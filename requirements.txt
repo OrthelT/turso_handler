@@ -1,0 +1,9 @@
+
+libsql_experimental
+pandas
+python-dotenv
+sqlalchemy
+argparse
+datetime
+sqlalchemy_libsql
+sqlalchemy.orm
