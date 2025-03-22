@@ -15,10 +15,12 @@ import argparse
 
 import logging
 
-from models import MarketStats, MarketOrders, Base, MarketHistory
+from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines
 
 logging.basicConfig(filename='logs/libsqltest.log', level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.filehandler = logging.FileHandler('logs/libsqltest.log')
+logger.filehandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -73,7 +75,7 @@ def get_type_names(df):
 
     query = f"SELECT typeID, typeName FROM invTypes WHERE typeID IN ({typestr})"
 
-    engine = create_engine(sde, echo=True)
+    engine = create_engine(sde, echo=False)
     with engine.connect() as conn:
         df2 = pd.read_sql_query(query, conn)
         df2.reset_index(drop=True, inplace=True)
@@ -85,7 +87,7 @@ def get_type_names(df):
 
 
 def fetch_from_brazil(selected_items: list):
-    engine = create_engine(turso, echo=True)
+    engine = create_engine(turso, echo=False)
     items = selected_items
     items_str = ','.join(str(i) for i in items)
 
@@ -109,7 +111,7 @@ def update_history():
     df.date = pd.to_datetime(df.date)
     data = df.to_dict(orient='records')
 
-    engine = create_engine(turso, echo=True)
+    engine = create_engine(turso, echo=False)
     start = datetime.now()
 
     with Session(engine) as session:
@@ -134,7 +136,7 @@ def update_orders():
 
     data = df.to_dict(orient='records')
 
-    engine = create_engine(turso, echo=True)
+    engine = create_engine(turso, echo=False)
     start = datetime.now()
 
     with Session(engine) as session:
@@ -158,7 +160,7 @@ def update_stats():
 
     start = datetime.now()
 
-    engine = create_engine(turso, echo=True)
+    engine = create_engine(turso, echo=False)
     with Session(engine) as session:
         try:
             mapper = inspect(MarketStats)
@@ -171,6 +173,30 @@ def update_stats():
     finish = datetime.now()
     stats_time = finish - start
     logger.info(f"stats time: {stats_time}, rows: {len(data)}")
+
+def update_doctrines():
+    df = pd.read_csv(new_doctrines)
+    df.timestamp = df.timestamp.sort_values(ascending=False)
+    ts = df.loc[0, "timestamp"]
+    df.timestamp = df.timestamp.apply(lambda x: ts if x == 0 else x)
+    df.infer_objects()
+    data = df.to_dict(orient='records')
+
+    engine = create_engine(turso, echo=False)
+    start = datetime.now()
+
+    with Session(engine) as session:
+        try:
+            mapper = inspect(Doctrines)
+            session.bulk_insert_mappings(mapper, data)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            print(f'error: {e}')
+ 
+    finish = datetime.now()
+    doctrines_time = finish - start
+    logger.info(f"doctrines time: {doctrines_time}, rows: {len(data)}")
 
 def main():
     parser = argparse.ArgumentParser(description="options for market ESI calls")
@@ -190,33 +216,37 @@ def main():
         logger.info("Running market update in quick mode, saved history data will be used.")
 
     logger.info(f"connecting to database: {turso}")
-    engine = create_engine(turso, echo=True)
+    engine = create_engine(turso, echo=False)
     conn = engine.connect()
     logger.info('removing and recreating tables...')
     with conn.begin():
         conn.execute(text("DROP TABLE IF EXISTS marketstats"))
         conn.execute(text("DROP TABLE IF EXISTS marketorders"))
         conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-
         conn.commit()
-    conn.close()
-    Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine)
 
     logger.info("starting df update...")
     logger.info('updating table: orders')
+    logger.info('-'*100)
     update_orders()
     logger.info('updating table: stats')
+    logger.info('-'*100)
     update_stats()
+    logger.info('updating table: doctrines')
+    logger.info('-'*100)
+    update_doctrines()
+    logger.info('-'*100)
 
     if args.hist:
         logger.info('updating table: history')
+        logger.info('-'*100)
         update_history()
     else:
         logger.info("df update complete")
 
     logger.info("syncing embedded replica and closing database connection...")
 
-    engine.dispose()
 
     conn = libsql.connect('wcmkt.db', sync_url=url, auth_token=auth_token)
     conn.sync()
@@ -225,11 +255,14 @@ def main():
 
 
 if __name__ == "__main__":
-    df = pd.read_csv(new_doctrines)
-    df = df.drop_duplicates(subset=["ship_name", "type_name", "group_name", "category_name"])
-    df = df.sort_values(by="timestamp", ascending=False)
-    df = df.reset_index(drop=True)
-    ts = df.loc[0, "timestamp"]
-    df['timestamp'] = df['timestamp'].apply(lambda x: ts if x == 0 else x)
-    df.to_csv(new_doctrines, index=False)
-    print(df.dtypes)
+    Start = datetime.now()
+    main()
+    print("="*100)
+    Finish = datetime.now()
+    Total_time = Finish - Start
+    logger.info(f"total time: {Total_time}")
+    print(f"""
+          total time: {Total_time}
+  
+          """)
+    print("="*100)
