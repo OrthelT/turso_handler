@@ -21,6 +21,11 @@ logging.basicConfig(filename='logs/libsqltest.log', level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.filehandler = logging.FileHandler('logs/libsqltest.log')
 logger.filehandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.streamhandler = logging.StreamHandler()
+logger.streamhandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.streamhandler.setLevel(logging.ERROR)
+logger.addHandler(logger.filehandler)
+logger.addHandler(logger.streamhandler)
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -37,6 +42,7 @@ url = os.getenv("TURSO_DATABASE_URL")
 auth_token = os.getenv("TURSO_AUTH_TOKEN")
 
 turso = f"sqlite+{url}/?authToken={auth_token}&secure=true"
+
 
 sde_url = os.getenv("SDE_URL")
 sde_auth_token = os.getenv("SDE_TOKEN")
@@ -121,7 +127,7 @@ def update_history():
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.info(f'error: {e}')
+            logger.error(f'error: {e}')
     session.close()
     finish = datetime.now()
     history_time = finish - start
@@ -146,9 +152,8 @@ def update_orders():
             session.commit()
         except Exception as e:
             session.rollback()
-            print(f'error: {e}')
+            logger.error(f'error: {e}')
 
-    session.close()
     finish = datetime.now()
     orders_time = finish - start
     logger.info(f"orders time: {orders_time}, rows: {len(data)}")
@@ -168,35 +173,52 @@ def update_stats():
             session.commit()
         except Exception as e:
             session.rollback()
-            print(f'error: {e}')
-    session.close()
+            logger.error(f'error: {e}')
+
     finish = datetime.now()
     stats_time = finish - start
     logger.info(f"stats time: {stats_time}, rows: {len(data)}")
 
 def update_doctrines():
+
+    logger.info(f"""
+                {'='*100}
+                updating doctrines table
+                {'-'*100}
+                """)
     df = pd.read_csv(new_doctrines)
-    df.timestamp = df.timestamp.sort_values(ascending=False)
-    ts = df.loc[0, "timestamp"]
-    df.timestamp = df.timestamp.apply(lambda x: ts if x == 0 else x)
-    df.infer_objects()
+    idrange = range(1,len(df)+1)
+    df['id'] = idrange
+
     data = df.to_dict(orient='records')
 
-    engine = create_engine(turso, echo=False)
+    engine = create_engine(turso,echo=True)
     start = datetime.now()
 
-    with Session(engine) as session:
-        try:
-            mapper = inspect(Doctrines)
-            session.bulk_insert_mappings(mapper, data)
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            print(f'error: {e}')
+    conn = engine.connect()
+
+    df.to_sql('doctrines', conn, if_exists='replace', index=False)
+
+    conn.commit()
+    conn.close()
+
+    # with Session(engine) as session:
+    #     try:
+    #         mapper = inspect(Doctrines)
+    #         session.bulk_insert_mappings(mapper, data)
+    #         session.commit()
+    #     except Exception as e:
+    #         session.rollback()
+    #         logger.error(f'error: {e}')
  
     finish = datetime.now()
     doctrines_time = finish - start
-    logger.info(f"doctrines time: {doctrines_time}, rows: {len(data)}")
+
+    logger.info(f"""
+                {'-'*100}
+                doctrines time: {doctrines_time}, rows: {len(data)}
+                {'='*100}
+                """)
 
 def main():
     parser = argparse.ArgumentParser(description="options for market ESI calls")
@@ -204,7 +226,7 @@ def main():
     # Add arguments
     parser.add_argument("--hist",
                         action="store_true",
-                        help="Refresh history data"
+                        help="--hist to refresh history data"
                         )
 
     args = parser.parse_args()
@@ -219,12 +241,13 @@ def main():
     engine = create_engine(turso, echo=False)
     conn = engine.connect()
     logger.info('removing and recreating tables...')
-    with conn.begin():
-        conn.execute(text("DROP TABLE IF EXISTS marketstats"))
-        conn.execute(text("DROP TABLE IF EXISTS marketorders"))
-        conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-        conn.commit()
-        Base.metadata.create_all(engine)
+    conn.execute(text("DROP TABLE IF EXISTS marketstats"))
+    conn.execute(text("DROP TABLE IF EXISTS marketorders"))
+    conn.execute(text("DROP TABLE IF EXISTS doctrines"))
+    conn.commit()
+    conn.close()
+    
+    Base.metadata.create_all(engine)
 
     logger.info("starting df update...")
     logger.info('updating table: orders')
@@ -238,6 +261,8 @@ def main():
     update_doctrines()
     logger.info('-'*100)
 
+    update_history()
+
     if args.hist:
         logger.info('updating table: history')
         logger.info('-'*100)
@@ -245,24 +270,9 @@ def main():
     else:
         logger.info("df update complete")
 
-    logger.info("syncing embedded replica and closing database connection...")
 
-
-    conn = libsql.connect('wcmkt.db', sync_url=url, auth_token=auth_token)
-    conn.sync()
-
-    logger.info("sync complete. closing database connection and exiting program.")
+        
 
 
 if __name__ == "__main__":
-    Start = datetime.now()
     main()
-    print("="*100)
-    Finish = datetime.now()
-    Total_time = Finish - Start
-    logger.info(f"total time: {Total_time}")
-    print(f"""
-          total time: {Total_time}
-  
-          """)
-    print("="*100)
