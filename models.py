@@ -1,10 +1,8 @@
 import pandas as pd
-from sqlalchemy import String, Integer, DateTime, Float, Boolean, create_engine
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
+from sqlalchemy import String, Integer, DateTime, Float, Boolean, create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Session, Mapped, mapped_column
+import libsql_experimental as libsql
 
-mkt_db = 'wcmkt.db'
 
 class Base(DeclarativeBase):
     pass
@@ -30,9 +28,9 @@ class MarketStats(Base):
         f"""marketstats(type_id={self.type_id!r}, 
         total_volume_remain={self.total_volume_remain!r}, 
         min_price={self.min_price!r},
-        price_5th_percentile={self.price_5th_percentile!r},
-        avg_of_avg_price={self.avg_of_avg_price!r},
-        avg_daily_volume={self.avg_daily_volume!r},
+        price={self.price!r},
+        avg_price={self.avg_price!r},
+        avg_volume={self.avg_volume!r},
         group_id={self.group_id!r},
         type_name={self.type_name!r},   
         group_name={self.group_name!r},
@@ -93,7 +91,7 @@ class Doctrines(Base):
     fit_qty: Mapped[int] = mapped_column(Integer, nullable=True)
     fits_on_mkt: Mapped[float] = mapped_column(Float, nullable=True)
     total_stock: Mapped[int] = mapped_column(Integer, nullable=True)
-    four_hour_price: Mapped[float] = mapped_column(Float, nullable=True)
+    price: Mapped[float] = mapped_column(Float, nullable=True)
     avg_vol: Mapped[float] = mapped_column(Float, nullable=True)
     days: Mapped[float] = mapped_column(Float, nullable=True)
     group_id: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -113,7 +111,7 @@ class Doctrines(Base):
         fit_qty={self.fit_qty!r},
         fits_on_mkt={self.fits_on_mkt!r},
         total_stock={self.total_stock!r},
-        four_hour_price={self.four_hour_price!r},
+        price={self.price!r},
         avg_vol={self.avg_vol!r},
         days={self.days!r},
         group_id={self.group_id!r},

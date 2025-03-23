@@ -11,7 +11,7 @@ import sqlalchemy_libsql
 import sqlalchemy.dialects.sqlite
 from datetime import timedelta, time, datetime
 import argparse
-
+import sqlite3
 
 import logging
 
@@ -24,8 +24,7 @@ logger.filehandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(le
 logger.streamhandler = logging.StreamHandler()
 logger.streamhandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.streamhandler.setLevel(logging.ERROR)
-logger.addHandler(logger.filehandler)
-logger.addHandler(logger.streamhandler)
+
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -38,24 +37,25 @@ new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
 
 load_dotenv()
 
-url = os.getenv("TURSO_DATABASE_URL")
-auth_token = os.getenv("TURSO_AUTH_TOKEN")
+fly_mkt_url = os.getenv("FLY_WCMKT_URL")
+fly_mkt_token = os.getenv("FLY_WCMKT_TOKEN")
+mkt_url = f"sqlite+{fly_mkt_url}/?authToken={fly_mkt_token}&secure=true"
 
-turso = f"sqlite+{url}/?authToken={auth_token}&secure=true"
+fly_sde_url = os.getenv("FLY_SDE_URL")
+fly_sde_token = os.getenv("FLY_SDE_TOKEN")
+sde_url = f"sqlite+{fly_sde_url}/?authToken={fly_sde_token}&secure=true"
+
+fly_mkt_local = "wcmkt.db"
+fly_sde_local = "sde.db"
 
 
-sde_url = os.getenv("SDE_URL")
-sde_auth_token = os.getenv("SDE_TOKEN")
+def example():
 
-sde = f"sqlite+{sde_url}/?authToken={sde_auth_token}&secure=true"
-
-def example(df):
-
-    conn = libsql.connect("wcmkt.db", sync_url=url, auth_token=auth_token)
+    conn = libsql.connect("wcmkt.db", sync_url=fly_mkt_url, auth_token=fly_mkt_token)
     conn.sync()
 
     # noinspection SqlDialectInspection
-    conn.execute("""CREATE TABLE IF NOT EXISTS marketstats (
+    conn.execute("""CREATE TABLE IF NOT EXISTS test_stats (
     type_id INTEGER,
     total_volume_remain INTEGER,
     min_price FLOAT,
@@ -72,54 +72,86 @@ def example(df):
     
     );""")
 
+    conn.close()
+    print("done")
 
 def get_type_names(df):
+    logger.info(f"getting type names for {len(df)} rows")
+    logger.info(f"date: {datetime.now()}")
+    logger.info(f"df: {df.head()}")
+    logger.info(f"df columns: {df.columns}")
+    logger.info("="*100)
     df.issued = pd.to_datetime(df.issued)
     df.drop(columns='type_name', inplace=True)
     type_ids = df.type_id.unique()
     typestr = ','.join(str(i) for i in type_ids)
 
     query = f"SELECT typeID, typeName FROM invTypes WHERE typeID IN ({typestr})"
+    logger.info(f"query: {query}")
+    try:
+        engine = create_engine(sde_url, echo=True)
+        with engine.connect() as conn:
+            df2 = pd.read_sql_query(query, conn)
+            df2.reset_index(drop=True, inplace=True)
+            rn_map = {'typeID':'type_id', 'typeName':'type_name'}
+            df2.rename(columns=rn_map, inplace=True)
+            named_df = pd.merge(df, df2, on='type_id', how='left')
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f"error in get_type_names: {e}")
+    
+        logger.info("*"*100)
+    logger.info("="*100)
 
-    engine = create_engine(sde, echo=False)
-    with engine.connect() as conn:
-        df2 = pd.read_sql_query(query, conn)
-        df2.reset_index(drop=True, inplace=True)
-
-    rn_map = {'typeID':'type_id', 'typeName':'type_name'}
-    df2.rename(columns=rn_map, inplace=True)
-    named_df = pd.merge(df, df2, on='type_id', how='left')
     return named_df
 
 
 def fetch_from_brazil(selected_items: list):
-    engine = create_engine(turso, echo=False)
+    engine = create_engine(mkt_url, echo=False)
     items = selected_items
     items_str = ','.join(str(i) for i in items)
-
+    params = {'items': items_str}
     # noinspection SqlDialectInspection
     stmt = text(f"""
             SELECT * FROM marketstats 
-            WHERE type_id IN ({items_str})
+            WHERE type_id IN (:items)
         """)
 
+    # with Session(engine) as session:
+    #     result = session.execute(stmt, params)
+    #     rows = result.fetchall()
+
     with Session(engine) as session:
-        result = session.execute(stmt)
-        rows = result.fetchall()
+        result = session.query(MarketStats).filter(MarketStats.type_id.in_(items)).all()
+
+    result_dict = [row.__dict__ for row in result]
 
     # noinspection PyTypeChecker
-    df = pd.DataFrame(rows, columns=result.keys())
+    df = pd.DataFrame(result_dict, columns=result_dict[0].keys())
+    df.drop(columns=['_sa_instance_state'], inplace=True)
+    old_cols = ['avg_price', 'group_id', 'group_name', 'category_name', 'last_update',
+       'min_price', 'price', 'type_id', 'total_volume_remain', 'avg_volume',
+       'type_name', 'category_id', 'days_remaining']
+    new_cols = ['type_id', 'type_name', 'price', 'total_volume_remain', 'days_remaining','avg_volume','avg_price', 'group_name', 'category_name', 'group_id', 
+        'category_id', 'last_update']
+    
+    rename_map = dict(zip(old_cols, new_cols))
+    df.rename(columns=rename_map, inplace=True)
+
     return df
 
 
 def update_history():
+    logger.info(f"updating history")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
     df = pd.read_csv(new_history)
     df.date = pd.to_datetime(df.date)
     data = df.to_dict(orient='records')
 
-    engine = create_engine(turso, echo=False)
+    engine = create_engine(mkt_url, echo=False)
     start = datetime.now()
-
+    
     with Session(engine) as session:
         try:
             mapper = inspect(MarketHistory)
@@ -127,22 +159,27 @@ def update_history():
             session.commit()
         except Exception as e:
             session.rollback()
+            logger.info("*"*100)
             logger.error(f'error: {e}')
+            logger.info("*"*100)
     session.close()
     finish = datetime.now()
     history_time = finish - start
     logger.info(f"history time: {history_time}, rows: {len(data)}")
+    logger.info("="*100)
 
 
 def update_orders():
+    logger.info(f"updating orders")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+
     df = pd.read_csv(new_orderscsv)
     df.issued = pd.to_datetime(df.issued)
-    df = get_type_names(df)
     df.infer_objects()
-
     data = df.to_dict(orient='records')
 
-    engine = create_engine(turso, echo=False)
+    engine = create_engine(mkt_url, echo=False)
     start = datetime.now()
 
     with Session(engine) as session:
@@ -152,20 +189,26 @@ def update_orders():
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error(f'error: {e}')
+            logger.info("*"*100)
+            logger.error(f'error: {e} in update_orders')
+            logger.info("*"*100)
 
     finish = datetime.now()
     orders_time = finish - start
     logger.info(f"orders time: {orders_time}, rows: {len(data)}")
+    logger.info("="*100)
 
 def update_stats():
+    logger.info(f"updating stats")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
     df = pd.read_csv(new_stats)
     df.last_update = pd.to_datetime(df.last_update)
     data = df.to_dict(orient='records')
 
     start = datetime.now()
 
-    engine = create_engine(turso, echo=False)
+    engine = create_engine(mkt_url, echo=False)
     with Session(engine) as session:
         try:
             mapper = inspect(MarketStats)
@@ -173,14 +216,17 @@ def update_stats():
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error(f'error: {e}')
+            logger.info("*"*100)
+            logger.error(f'error: {e} in update_stats')
+            logger.info("*"*100)
 
     finish = datetime.now()
     stats_time = finish - start
     logger.info(f"stats time: {stats_time}, rows: {len(data)}")
+    logger.info("="*100)
 
 def update_doctrines():
-
+    start = datetime.now()
     logger.info(f"""
                 {'='*100}
                 updating doctrines table
@@ -190,27 +236,26 @@ def update_doctrines():
     idrange = range(1,len(df)+1)
     df['id'] = idrange
 
+    df = df.sort_values(by='timestamp', ascending=False)
+    df.reset_index(drop=True, inplace=True)
+    ts = df.timestamp[0]
+    df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
+    df.timestamp = pd.to_datetime(df.timestamp)
+    df.rename(columns={'4H_price':'price'}, inplace=True)
+
     data = df.to_dict(orient='records')
+    try:
+        engine = create_engine(mkt_url,echo=False)    
+        with Session(engine) as session:
+            mapper = inspect(Doctrines)
+            session.bulk_insert_mappings(mapper, data)
+            session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_doctrines')
+        logger.info("*"*100)
 
-    engine = create_engine(turso,echo=True)
-    start = datetime.now()
-
-    conn = engine.connect()
-
-    df.to_sql('doctrines', conn, if_exists='replace', index=False)
-
-    conn.commit()
-    conn.close()
-
-    # with Session(engine) as session:
-    #     try:
-    #         mapper = inspect(Doctrines)
-    #         session.bulk_insert_mappings(mapper, data)
-    #         session.commit()
-    #     except Exception as e:
-    #         session.rollback()
-    #         logger.error(f'error: {e}')
- 
     finish = datetime.now()
     doctrines_time = finish - start
 
@@ -221,6 +266,9 @@ def update_doctrines():
                 """)
 
 def main():
+    logger.info(f"starting main")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
     parser = argparse.ArgumentParser(description="options for market ESI calls")
 
     # Add arguments
@@ -237,42 +285,78 @@ def main():
     else:
         logger.info("Running market update in quick mode, saved history data will be used.")
 
-    logger.info(f"connecting to database: {turso}")
-    engine = create_engine(turso, echo=False)
-    conn = engine.connect()
-    logger.info('removing and recreating tables...')
-    conn.execute(text("DROP TABLE IF EXISTS marketstats"))
-    conn.execute(text("DROP TABLE IF EXISTS marketorders"))
-    conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-    conn.commit()
-    conn.close()
+    logger.info(f"connecting to database: {mkt_url}")
+    try:
+        engine = create_engine(mkt_url, echo=False)
+        conn = engine.connect()
+        logger.info('removing and recreating tables...')
+        conn.execute(text("DROP TABLE IF EXISTS marketstats"))
+        conn.execute(text("DROP TABLE IF EXISTS marketorders"))
+        conn.execute(text("DROP TABLE IF EXISTS doctrines"))
+        conn.commit()
+        conn.close()
+        logger.info('tables removed')
+
+    except Exception as e:
+        logger.error(f'error: {e}')
     
-    Base.metadata.create_all(engine)
+    try:
+        logger.info('creating tables...')
+        Base.metadata.create_all(engine)
+        logger.info('tables created')
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in create_tables')
+        logger.info("*"*100)
 
-    logger.info("starting df update...")
-    logger.info('updating table: orders')
-    logger.info('-'*100)
-    update_orders()
-    logger.info('updating table: stats')
-    logger.info('-'*100)
-    update_stats()
-    logger.info('updating table: doctrines')
-    logger.info('-'*100)
-    update_doctrines()
-    logger.info('-'*100)
+    logger.info("starting db update...")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
 
-    update_history()
+    try:
+        logger.info('updating table: orders')
+        logger.info('-'*100)
+        update_orders()
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_orders, returning to main')
+        logger.info("*"*100)
+    
+    try:
+        logger.info('updating table: stats')
+        logger.info('-'*100)
+        update_stats()
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_stats, returning to main')
+        logger.info("*"*100)
+
+    try:
+        logger.info('updating table: doctrines')
+        logger.info('-'*100)
+        update_doctrines()
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_doctrines, returning to main')
+        logger.info("*"*100)
+
+    logger.info('-'*100)
 
     if args.hist:
-        logger.info('updating table: history')
-        logger.info('-'*100)
-        update_history()
+        try:
+            logger.info('updating table: history')
+            logger.info('-'*100)
+            update_history()
+        except Exception as e:
+            logger.info("*"*100)
+            logger.error(f'error: {e} in update_history, returning to main')
+            logger.info("*"*100)
     else:
         logger.info("df update complete")
 
 
-        
-
+    
 
 if __name__ == "__main__":
+
     main()
