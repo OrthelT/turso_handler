@@ -293,6 +293,7 @@ def main():
         conn.execute(text("DROP TABLE IF EXISTS marketstats"))
         conn.execute(text("DROP TABLE IF EXISTS marketorders"))
         conn.execute(text("DROP TABLE IF EXISTS doctrines"))
+        conn.execute(text("DROP TABLE IF EXISTS market_history"))
         conn.commit()
         conn.close()
         logger.info('tables removed')
@@ -342,15 +343,15 @@ def main():
 
     logger.info('-'*100)
 
-    if args.hist:
-        try:
-            logger.info('updating table: history')
-            logger.info('-'*100)
-            update_history()
-        except Exception as e:
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_history, returning to main')
-            logger.info("*"*100)
+
+    try:
+        logger.info('updating table: history')
+        logger.info('-'*100)
+        update_history()
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_history, returning to main')
+        logger.info("*"*100)
     else:
         logger.info("df update complete")
 
