@@ -120,6 +120,19 @@ class Doctrines(Base):
         category_name={self.category_name!r},
         timestamp={self.timestamp!r}
         )"""
+class ShipTargets(Base):
+    __tablename__ = "ship_targets"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fit_id: Mapped[int] = mapped_column(Integer)
+    fit_name: Mapped[str] = mapped_column(String)
+    ship_id: Mapped[int] = mapped_column(Integer)
+    ship_name: Mapped[str] = mapped_column(String)
+    ship_target: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[DateTime] = mapped_column(DateTime)
 
-if __name__ == "__main__":
-    pass
+    def __repr__(self) -> str:
+        f"""ship_targets(
+        ship_name={self.ship_name!r},
+        target={self.target!r},
+        created_at={self.created_at!r}
+        )"""

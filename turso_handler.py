@@ -14,17 +14,29 @@ import argparse
 import sqlite3
 
 import logging
+from logging.handlers import RotatingFileHandler
 
-from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines
+from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets
 
-logging.basicConfig(filename='logs/libsqltest.log', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.filehandler = logging.FileHandler('logs/libsqltest.log')
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Setup rotating file handler (10MB max size, keep 5 backup files)
+logger.filehandler = RotatingFileHandler(
+    'logs/turso_handler.log', 
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
 logger.filehandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(logger.filehandler)
+
 logger.streamhandler = logging.StreamHandler()
 logger.streamhandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.streamhandler.setLevel(logging.ERROR)
-
+logger.addHandler(logger.streamhandler)
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -34,6 +46,7 @@ new_stats = f"{path_begin}/eveESO/output/brazil/new_stats.csv"
 watchlist = f"{path_begin}/eveESO/output/brazil/watchlist.csv"
 new_orderscsv = f"{path_begin}/eveESO/output/brazil/new_orders.csv"
 new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
+ship_targets = f"{path_begin}/eveESO/data/ship_targets.csv"
 
 load_dotenv()
 
@@ -265,6 +278,21 @@ def update_doctrines():
                 {'='*100}
                 """)
 
+def update_ship_targets():
+    logger.info(f"updating ship targets")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+    df = pd.read_csv(ship_targets)
+    df.created_at = pd.to_datetime(df.created_at)
+
+    data = df.to_dict(orient='records')
+
+    engine = create_engine(mkt_url, echo=False)
+    with Session(engine) as session:
+        mapper = inspect(ShipTargets)
+        session.bulk_insert_mappings(mapper, data)
+        session.commit()
+
 def main():
     logger.info(f"starting main")
     logger.info(f"date: {datetime.now()}")
@@ -294,6 +322,7 @@ def main():
         conn.execute(text("DROP TABLE IF EXISTS marketorders"))
         conn.execute(text("DROP TABLE IF EXISTS doctrines"))
         conn.execute(text("DROP TABLE IF EXISTS market_history"))
+        conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
         conn.commit()
         conn.close()
         logger.info('tables removed')
@@ -355,9 +384,16 @@ def main():
     else:
         logger.info("df update complete")
 
-
-    
+    try:
+        logger.info('updating table: ship targets')
+        logger.info('-'*100)
+        update_ship_targets()
+    except Exception as e:
+        logger.info("*"*100)
+        logger.error(f'error: {e} in update_ship_targets, returning to main')
+        logger.info("*"*100)
 
 if __name__ == "__main__":
 
     main()
+
