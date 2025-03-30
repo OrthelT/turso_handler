@@ -5,7 +5,7 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 from pandas import read_sql_query
-from sqlalchemy import create_engine, select, text, inspect
+from sqlalchemy import create_engine, select, text, inspect, Table
 from sqlalchemy.orm import Session, base, DeclarativeBase, sessionmaker
 import sqlalchemy_libsql
 import sqlalchemy.dialects.sqlite
@@ -46,7 +46,7 @@ new_stats = f"{path_begin}/eveESO/output/brazil/new_stats.csv"
 watchlist = f"{path_begin}/eveESO/output/brazil/watchlist.csv"
 new_orderscsv = f"{path_begin}/eveESO/output/brazil/new_orders.csv"
 new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
-ship_targets = f"{path_begin}/eveESO/data/ship_targets.csv"
+ship_targets = f"{path_begin}/eveESO/data/ship_targets2.csv"
 
 load_dotenv()
 
@@ -394,6 +394,4 @@ def main():
         logger.info("*"*100)
 
 if __name__ == "__main__":
-
     main()
-

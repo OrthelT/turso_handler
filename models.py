@@ -132,7 +132,10 @@ class ShipTargets(Base):
 
     def __repr__(self) -> str:
         f"""ship_targets(
+        fit_id={self.fit_id!r},
+        fit_name={self.fit_name!r},
+        ship_id={self.ship_id!r},
         ship_name={self.ship_name!r},
-        target={self.target!r},
+        ship_target={self.ship_target!r},
         created_at={self.created_at!r}
         )"""
