@@ -62,31 +62,31 @@ fly_mkt_local = "wcmkt.db"
 fly_sde_local = "sde.db"
 
 
-def example():
+# def example():
 
-    conn = libsql.connect("wcmkt.db", sync_url=fly_mkt_url, auth_token=fly_mkt_token)
-    conn.sync()
+#     conn = libsql.connect("wcmkt.db", sync_url=fly_mkt_url, auth_token=fly_mkt_token)
+#     conn.sync()
 
-    # noinspection SqlDialectInspection
-    conn.execute("""CREATE TABLE IF NOT EXISTS test_stats (
-    type_id INTEGER,
-    total_volume_remain INTEGER,
-    min_price FLOAT,
-    price_5th_percentile FLOAT,
-    avg_of_avg_price FLOAT,
-    avg_daily_volume FLOAT,
-    group_id INTEGER,
-    type_name TEXT,
-    group_name TEXT,
-    category_id INTEGER,
-    category_name TEXT,
-    days_remaining FLOAT,
-    last_update DATETIME
+#     # noinspection SqlDialectInspection
+#     conn.execute("""CREATE TABLE IF NOT EXISTS test_stats (
+#     type_id INTEGER,
+#     total_volume_remain INTEGER,
+#     min_price FLOAT,
+#     price_5th_percentile FLOAT,
+#     avg_of_avg_price FLOAT,
+#     avg_daily_volume FLOAT,
+#     group_id INTEGER,
+#     type_name TEXT,
+#     group_name TEXT,
+#     category_id INTEGER,
+#     category_name TEXT,
+#     days_remaining FLOAT,
+#     last_update DATETIME
     
-    );""")
+#     );""")
 
-    conn.close()
-    print("done")
+#     conn.close()
+#     print("done")
 
 def get_type_names(df):
     logger.info(f"getting type names for {len(df)} rows")
@@ -197,8 +197,33 @@ def update_orders():
 
     with Session(engine) as session:
         try:
-            mapper = inspect(MarketOrders)
-            session.bulk_insert_mappings(mapper, data)
+            # Get existing order IDs
+            existing_orders = session.query(MarketOrders.order_id).all()
+            existing_ids = {order[0] for order in existing_orders}
+            
+            # Split data into updates and inserts
+            updates = []
+            inserts = []
+            for record in data:
+                if record['order_id'] in existing_ids:
+                    updates.append(record)
+                else:
+                    inserts.append(record)
+            
+            # Perform updates
+            if updates:
+                logger.info(f"Updating {len(updates)} existing orders")
+                for record in updates:
+                    session.query(MarketOrders).filter(
+                        MarketOrders.order_id == record['order_id']
+                    ).update(record)
+            
+            # Perform inserts
+            if inserts:
+                logger.info(f"Inserting {len(inserts)} new orders")
+                mapper = inspect(MarketOrders)
+                session.bulk_insert_mappings(mapper, inserts)
+            
             session.commit()
         except Exception as e:
             session.rollback()
@@ -309,6 +334,8 @@ def main():
 
     if args.hist:
         logger.info("Running Brazil update with full history refresh.")
+        conn.execute(text("DROP TABLE IF EXISTS market_history"))
+
 
     else:
         logger.info("Running market update in quick mode, saved history data will be used.")
@@ -319,9 +346,7 @@ def main():
         conn = engine.connect()
         logger.info('removing and recreating tables...')
         conn.execute(text("DROP TABLE IF EXISTS marketstats"))
-        conn.execute(text("DROP TABLE IF EXISTS marketorders"))
         conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-        conn.execute(text("DROP TABLE IF EXISTS market_history"))
         conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
         conn.commit()
         conn.close()
@@ -343,6 +368,18 @@ def main():
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
 
+    #update history
+    if args.hist:
+        try:
+            logger.info('updating table: history')
+            logger.info('-'*100)
+            update_history()
+        except Exception as e:
+            logger.info("*"*100)
+            logger.error(f'error: {e} in update_history, returning to main')
+            logger.info("*"*100)
+
+    #update orders
     try:
         logger.info('updating table: orders')
         logger.info('-'*100)
@@ -351,7 +388,8 @@ def main():
         logger.info("*"*100)
         logger.error(f'error: {e} in update_orders, returning to main')
         logger.info("*"*100)
-    
+
+    #update stats
     try:
         logger.info('updating table: stats')
         logger.info('-'*100)
@@ -361,6 +399,7 @@ def main():
         logger.error(f'error: {e} in update_stats, returning to main')
         logger.info("*"*100)
 
+    #update doctrines
     try:
         logger.info('updating table: doctrines')
         logger.info('-'*100)
@@ -372,18 +411,7 @@ def main():
 
     logger.info('-'*100)
 
-
-    try:
-        logger.info('updating table: history')
-        logger.info('-'*100)
-        update_history()
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_history, returning to main')
-        logger.info("*"*100)
-    else:
-        logger.info("df update complete")
-
+    #update ship targets
     try:
         logger.info('updating table: ship targets')
         logger.info('-'*100)
