@@ -242,6 +242,10 @@ def update_stats():
     logger.info("="*100)
     df = pd.read_csv(new_stats)
     df.last_update = pd.to_datetime(df.last_update)
+
+    # Rename avg_vol column to avg_volume to match the database model
+    logger.info("Column names before renaming: %s", df.columns.tolist())
+    logger.info("Column names after renaming: %s", df.columns.tolist())
     data = df.to_dict(orient='records')
 
     start = datetime.now()
@@ -422,4 +426,4 @@ def main():
         logger.info("*"*100)
 
 if __name__ == "__main__":
-    main()
+    update_stats()
