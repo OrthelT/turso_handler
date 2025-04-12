@@ -245,6 +245,7 @@ def update_stats():
 
     # Rename avg_vol column to avg_volume to match the database model
     logger.info("Column names before renaming: %s", df.columns.tolist())
+    df = df.rename(columns={'avg_vol': 'avg_volume'})
     logger.info("Column names after renaming: %s", df.columns.tolist())
     data = df.to_dict(orient='records')
 
@@ -426,4 +427,4 @@ def main():
         logger.info("*"*100)
 
 if __name__ == "__main__":
-    update_stats()
+    main()
