@@ -338,9 +338,11 @@ def main():
     args = parser.parse_args()
 
     if args.hist:
+        engine = create_engine(mkt_url, echo=False)
+        conn = engine.connect()
         logger.info("Running Brazil update with full history refresh.")
         conn.execute(text("DROP TABLE IF EXISTS market_history"))
-
+        conn.commit()
 
     else:
         logger.info("Running market update in quick mode, saved history data will be used.")

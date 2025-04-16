@@ -6,3 +6,4 @@ logs/
 .vscode/
 awsenv.txt
 brazil/
+*.csv
