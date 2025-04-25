@@ -12,6 +12,7 @@ import sqlalchemy.dialects.sqlite
 from datetime import timedelta, time, datetime
 import argparse
 import sqlite3
+import numpy as np
 
 import logging
 from logging.handlers import RotatingFileHandler
@@ -189,7 +190,17 @@ def update_orders():
 
     df = pd.read_csv(new_orderscsv)
     df.issued = pd.to_datetime(df.issued)
+    
+    # Replace inf and NaN values with None/NULL
+    df = df.replace([np.inf, -np.inf], None)
+    df = df.replace(np.nan, None)
+    
     df.infer_objects()
+    
+    # Get only the columns that exist in the MarketOrders model
+    valid_columns = [column.key for column in inspect(MarketOrders).columns]
+    df = df[df.columns.intersection(valid_columns)]
+    
     data = df.to_dict(orient='records')
 
     engine = create_engine(mkt_url, echo=False)
@@ -353,6 +364,7 @@ def main():
         conn = engine.connect()
         logger.info('removing and recreating tables...')
         conn.execute(text("DROP TABLE IF EXISTS marketstats"))
+        conn.execute(text("DROP TABLE IF EXISTS marketorders"))
         conn.execute(text("DROP TABLE IF EXISTS doctrines"))
         conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
         conn.commit()
