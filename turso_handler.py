@@ -63,32 +63,6 @@ fly_mkt_local = "wcmkt.db"
 fly_sde_local = "sde.db"
 
 
-# def example():
-
-#     conn = libsql.connect("wcmkt.db", sync_url=fly_mkt_url, auth_token=fly_mkt_token)
-#     conn.sync()
-
-#     # noinspection SqlDialectInspection
-#     conn.execute("""CREATE TABLE IF NOT EXISTS test_stats (
-#     type_id INTEGER,
-#     total_volume_remain INTEGER,
-#     min_price FLOAT,
-#     price_5th_percentile FLOAT,
-#     avg_of_avg_price FLOAT,
-#     avg_daily_volume FLOAT,
-#     group_id INTEGER,
-#     type_name TEXT,
-#     group_name TEXT,
-#     category_id INTEGER,
-#     category_name TEXT,
-#     days_remaining FLOAT,
-#     last_update DATETIME
-    
-#     );""")
-
-#     conn.close()
-#     print("done")
-
 def get_type_names(df):
     logger.info(f"getting type names for {len(df)} rows")
     logger.info(f"date: {datetime.now()}")
