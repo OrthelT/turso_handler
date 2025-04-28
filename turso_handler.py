@@ -1,10 +1,8 @@
 import json
-
 import libsql_experimental as libsql
 import pandas as pd
 import os
 from dotenv import load_dotenv
-from pandas import read_sql_query
 from sqlalchemy import create_engine, select, text, inspect, Table
 from sqlalchemy.orm import Session, base, DeclarativeBase, sessionmaker
 import sqlalchemy_libsql
@@ -14,30 +12,11 @@ import argparse
 import sqlite3
 import numpy as np
 
-import logging
 from logging.handlers import RotatingFileHandler
-
+from logging_config import setup_logging
 from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Create logs directory if it doesn't exist
-os.makedirs('logs', exist_ok=True)
-
-# Setup rotating file handler (10MB max size, keep 5 backup files)
-logger.filehandler = RotatingFileHandler(
-    'logs/turso_handler.log', 
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5
-)
-logger.filehandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(logger.filehandler)
-
-logger.streamhandler = logging.StreamHandler()
-logger.streamhandler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.streamhandler.setLevel(logging.ERROR)
-logger.addHandler(logger.streamhandler)
+logger = setup_logging()
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -48,6 +27,8 @@ watchlist = f"{path_begin}/eveESO/output/brazil/watchlist.csv"
 new_orderscsv = f"{path_begin}/eveESO/output/brazil/new_orders.csv"
 new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
 ship_targets = f"{path_begin}/eveESO/data/ship_targets2.csv"
+path = f"{path_begin}/eveESO/output/brazil/"
+ship_targets_path = f"{path_begin}/eveESO/data/ship_targets.csv"
 
 load_dotenv()
 
@@ -156,7 +137,6 @@ def update_history():
     history_time = finish - start
     logger.info(f"history time: {history_time}, rows: {len(data)}")
     logger.info("="*100)
-
 
 def update_orders():
     logger.info(f"updating orders")
@@ -309,6 +289,28 @@ def update_ship_targets():
         session.bulk_insert_mappings(mapper, data)
         session.commit()
 
+def check_tables():
+    logger.info(f"checking tables")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+
+    table_dict = {}
+
+    tables = os.listdir(path)
+
+    for table in tables:
+        logger.info("="*100)
+        if table.endswith(".csv"):
+            df = pd.read_csv(path + table)
+            table_name = table.split(".")[0]
+            table_dict[table_name] = len(df)
+            logger.info(f"{table_name}: {len(df)}")
+    df = pd.read_csv(ship_targets_path)
+    table_dict['ship_targets'] = len(df)
+    logger.info("="*100)
+    return table_dict
+
+
 def main():
     logger.info(f"starting main")
     logger.info(f"date: {datetime.now()}")
@@ -322,26 +324,44 @@ def main():
                         )
 
     args = parser.parse_args()
+    table_dict = check_tables()
+
+
 
     if args.hist:
         engine = create_engine(mkt_url, echo=False)
         conn = engine.connect()
         logger.info("Running Brazil update with full history refresh.")
-        conn.execute(text("DROP TABLE IF EXISTS market_history"))
-        conn.commit()
-
+        if table_dict['new_history'] > 0:
+            conn.execute(text("DROP TABLE IF EXISTS market_history"))
+            conn.commit()
+        else:
+            logger.error("History table is empty, skipping history refresh.")
     else:
         logger.info("Running market update in quick mode, saved history data will be used.")
 
     logger.info(f"connecting to database: {mkt_url}")
+
     try:
         engine = create_engine(mkt_url, echo=False)
         conn = engine.connect()
         logger.info('removing and recreating tables...')
-        conn.execute(text("DROP TABLE IF EXISTS marketstats"))
-        conn.execute(text("DROP TABLE IF EXISTS marketorders"))
-        conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-        conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
+        if table_dict['new_stats'] > 1:
+            conn.execute(text("DROP TABLE IF EXISTS marketstats"))
+        else:
+            logger.error("Stats table is empty, skipping stats refresh.")
+        if table_dict['new_orders'] > 1:
+            conn.execute(text("DROP TABLE IF EXISTS marketorders"))
+        else:
+            logger.error("Orders table is empty, skipping orders refresh.")
+        if table_dict['new_doctrines'] > 1:
+            conn.execute(text("DROP TABLE IF EXISTS doctrines"))
+        else:
+            logger.error("Doctrines table is empty, skipping doctrines refresh.")
+        if table_dict['ship_targets'] > 1:
+            conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
+        else:
+            logger.error("Ship targets table is empty, skipping ship targets refresh.")
         conn.commit()
         conn.close()
         logger.info('tables removed')
@@ -359,15 +379,19 @@ def main():
         logger.info("*"*100)
 
     logger.info("starting db update...")
-    logger.info(f"date: {datetime.now()}")
+    logger.info(f"date: {datetime.now()}\n\n")
     logger.info("="*100)
 
     #update history
     if args.hist:
         try:
-            logger.info('updating table: history')
-            logger.info('-'*100)
-            update_history()
+
+            if table_dict['new_history'] > 1:
+                logger.info('updating table: history')
+                logger.info('-'*100)
+                update_history()
+            else:
+                logger.error("History table is empty, skipping history refresh.")
         except Exception as e:
             logger.info("*"*100)
             logger.error(f'error: {e} in update_history, returning to main')
@@ -375,9 +399,14 @@ def main():
 
     #update orders
     try:
-        logger.info('updating table: orders')
-        logger.info('-'*100)
-        update_orders()
+
+        if table_dict['new_orders'] > 1:
+            logger.info('updating table: orders')
+            logger.info('-'*100)
+            update_orders()
+        else:
+            logger.error("Orders table is empty, skipping orders refresh.")
+            
     except Exception as e:
         logger.info("*"*100)
         logger.error(f'error: {e} in update_orders, returning to main')
@@ -385,9 +414,13 @@ def main():
 
     #update stats
     try:
-        logger.info('updating table: stats')
-        logger.info('-'*100)
-        update_stats()
+
+        if table_dict['new_stats'] > 1:
+            logger.info('updating table: stats')
+            logger.info('-'*100)
+            update_stats()
+        else:
+            logger.error("Stats table is empty, skipping stats refresh.")
     except Exception as e:
         logger.info("*"*100)
         logger.error(f'error: {e} in update_stats, returning to main')
@@ -395,9 +428,13 @@ def main():
 
     #update doctrines
     try:
-        logger.info('updating table: doctrines')
-        logger.info('-'*100)
-        update_doctrines()
+
+        if table_dict['new_doctrines'] > 1:
+            logger.info('updating table: doctrines')
+            logger.info('-'*100)
+            update_doctrines()
+        else:
+            logger.error("Doctrines table is empty, skipping doctrines refresh.")
     except Exception as e:
         logger.info("*"*100)
         logger.error(f'error: {e} in update_doctrines, returning to main')
@@ -407,9 +444,13 @@ def main():
 
     #update ship targets
     try:
-        logger.info('updating table: ship targets')
-        logger.info('-'*100)
-        update_ship_targets()
+        
+        if table_dict['ship_targets'] > 1:
+            logger.info('updating table: ship targets')
+            logger.info('-'*100)    
+            update_ship_targets()
+        else:
+            logger.error("Ship targets table is empty, skipping ship targets refresh.")
     except Exception as e:
         logger.info("*"*100)
         logger.error(f'error: {e} in update_ship_targets, returning to main')
