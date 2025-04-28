@@ -79,7 +79,7 @@ class MarketHistory(Base):
     highest: Mapped[float] = mapped_column(Float)
     lowest: Mapped[float] = mapped_column(Float)
     order_count: Mapped[int] = mapped_column(Integer)
-    last_update: Mapped[DateTime] = mapped_column(DateTime, nullable=True)
+    timestamp: Mapped[DateTime] = mapped_column(DateTime, nullable=True)
 
 class Doctrines(Base):
     __tablename__ = "doctrines"

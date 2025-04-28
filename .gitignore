@@ -7,3 +7,5 @@ logs/
 awsenv.txt
 brazil/
 *.csv
+*.db-shm
+*.db-wal

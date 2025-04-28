@@ -135,6 +135,7 @@ def update_history():
     logger.info("="*100)
     df = pd.read_csv(new_history)
     df.date = pd.to_datetime(df.date)
+    df.timestamp = pd.to_datetime(df.timestamp)
     data = df.to_dict(orient='records')
 
     engine = create_engine(mkt_url, echo=False)
