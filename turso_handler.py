@@ -2,6 +2,8 @@ import json
 import libsql_experimental as libsql
 import pandas as pd
 import os
+import shutil
+import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, select, text, inspect, Table
 from sqlalchemy.orm import Session, base, DeclarativeBase, sessionmaker
@@ -30,6 +32,10 @@ ship_targets = f"{path_begin}/eveESO/data/ship_targets2.csv"
 path = f"{path_begin}/eveESO/output/brazil/"
 ship_targets_path = f"{path_begin}/eveESO/data/ship_targets.csv"
 
+# Backup directory
+backup_dir = f"{path_begin}/eveESO/backup"
+os.makedirs(backup_dir, exist_ok=True)
+
 load_dotenv()
 
 fly_mkt_url = os.getenv("FLY_WCMKT_URL")
@@ -43,6 +49,103 @@ sde_url = f"sqlite+{fly_sde_url}/?authToken={fly_sde_token}&secure=true"
 fly_mkt_local = "wcmkt.db"
 fly_sde_local = "sde.db"
 
+# Max retry attempts for database operations
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+
+def retry_operation(operation_func, *args, **kwargs):
+    """Retry an operation with exponential backoff."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return operation_func(*args, **kwargs)
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                logger.warning(f"Operation failed: {e}. Retrying in {wait_time} seconds... (Attempt {attempt+1}/{MAX_RETRIES})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Operation failed after {MAX_RETRIES} attempts: {e}")
+                raise
+
+def backup_database():
+    """Create a backup of the current database state."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_filename = f"{backup_dir}/wcmkt_backup_{timestamp}.db"
+    
+    try:
+        # For local SQLite database
+        if os.path.exists(fly_mkt_local):
+            shutil.copy2(fly_mkt_local, backup_filename)
+            logger.info(f"Local database backed up to {backup_filename}")
+            return backup_filename
+        
+        # For remote Turso database - download a snapshot first
+        engine = create_engine(mkt_url, echo=False)
+        with engine.connect() as conn:
+            # Get all tables and their data
+            tables = {}
+            for table_name in inspect(engine).get_table_names():
+                result = conn.execute(text(f"SELECT * FROM {table_name}"))
+                data = [dict(row) for row in result]
+                tables[table_name] = data
+            
+            # Save the data to a JSON file as backup
+            json_backup = f"{backup_dir}/wcmkt_backup_{timestamp}.json"
+            with open(json_backup, 'w') as f:
+                json.dump(tables, f)
+            
+            logger.info(f"Remote database backed up to {json_backup}")
+            return json_backup
+    except Exception as e:
+        logger.error(f"Failed to create database backup: {e}")
+        return None
+
+def restore_database(backup_file):
+    """Restore the database from a backup."""
+    if not backup_file or not os.path.exists(backup_file):
+        logger.error(f"Backup file not found: {backup_file}")
+        return False
+    
+    try:
+        if backup_file.endswith('.db'):
+            # For local SQLite database
+            shutil.copy2(backup_file, fly_mkt_local)
+            logger.info(f"Database restored from {backup_file}")
+        elif backup_file.endswith('.json'):
+            # For remote Turso database - restore from JSON
+            engine = create_engine(mkt_url, echo=False)
+            with open(backup_file, 'r') as f:
+                tables = json.load(f)
+            
+            with engine.connect() as conn:
+                # Drop all existing tables and recreate from backup
+                for table_name, data in tables.items():
+                    if data:  # Only if there's data to restore
+                        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+                        # Generate create table statements (simplified)
+                        # In practice, you might need to determine the schema from the data
+                        # For now, we'll rely on Base.metadata.create_all to recreate the schema
+                
+                # Recreate tables
+                Base.metadata.create_all(engine)
+                
+                # Insert data
+                for table_name, data in tables.items():
+                    if data:
+                        for row in data:
+                            stmt = text(f"INSERT INTO {table_name} VALUES ({', '.join([':'+k for k in row.keys()])})")
+                            conn.execute(stmt, row)
+                conn.commit()
+            
+            logger.info(f"Database restored from {backup_file}")
+        else:
+            logger.error(f"Unknown backup file format: {backup_file}")
+            return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"Failed to restore database: {e}")
+        return False
 
 def get_type_names(df):
     logger.info(f"getting type names for {len(df)} rows")
@@ -86,10 +189,6 @@ def fetch_from_brazil(selected_items: list):
             WHERE type_id IN (:items)
         """)
 
-    # with Session(engine) as session:
-    #     result = session.execute(stmt, params)
-    #     rows = result.fetchall()
-
     with Session(engine) as session:
         result = session.query(MarketStats).filter(MarketStats.type_id.in_(items)).all()
 
@@ -109,7 +208,6 @@ def fetch_from_brazil(selected_items: list):
 
     return df
 
-
 def update_history():
     logger.info(f"updating history")
     logger.info(f"date: {datetime.now()}")
@@ -119,20 +217,36 @@ def update_history():
     df.timestamp = pd.to_datetime(df.timestamp)
     data = df.to_dict(orient='records')
 
-    engine = create_engine(mkt_url, echo=False)
+    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
     start = datetime.now()
     
     with Session(engine) as session:
         try:
-            mapper = inspect(MarketHistory)
-            session.bulk_insert_mappings(mapper, data)
+            # Clear existing data
+            logger.info(f"Clearing existing history data")
+            session.execute(text("DELETE FROM market_history"))
             session.commit()
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} history records")
+            if data:
+                # Split into chunks
+                chunk_size = 1000
+                for i in range(0, len(data), chunk_size):
+                    chunk = data[i:i+chunk_size]
+                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    mapper = inspect(MarketHistory)
+                    session.bulk_insert_mappings(mapper, chunk)
+                    session.commit()
+                    
+            logger.info(f"History update completed")
         except Exception as e:
             session.rollback()
             logger.info("*"*100)
-            logger.error(f'error: {e}')
+            logger.error(f'error: {e} in update_history')
             logger.info("*"*100)
-    session.close()
+            raise
+    
     finish = datetime.now()
     history_time = finish - start
     logger.info(f"history time: {history_time}, rows: {len(data)}")
@@ -158,44 +272,35 @@ def update_orders():
     
     data = df.to_dict(orient='records')
 
-    engine = create_engine(mkt_url, echo=False)
+    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
     start = datetime.now()
 
     with Session(engine) as session:
         try:
-            # Get existing order IDs
-            existing_orders = session.query(MarketOrders.order_id).all()
-            existing_ids = {order[0] for order in existing_orders}
-            
-            # Split data into updates and inserts
-            updates = []
-            inserts = []
-            for record in data:
-                if record['order_id'] in existing_ids:
-                    updates.append(record)
-                else:
-                    inserts.append(record)
-            
-            # Perform updates
-            if updates:
-                logger.info(f"Updating {len(updates)} existing orders")
-                for record in updates:
-                    session.query(MarketOrders).filter(
-                        MarketOrders.order_id == record['order_id']
-                    ).update(record)
-            
-            # Perform inserts
-            if inserts:
-                logger.info(f"Inserting {len(inserts)} new orders")
-                mapper = inspect(MarketOrders)
-                session.bulk_insert_mappings(mapper, inserts)
-            
+            # First clear the existing data - more efficient for large updates
+            logger.info(f"Clearing existing orders data")
+            session.execute(text("DELETE FROM marketorders"))
             session.commit()
+            
+            # Then bulk insert all the new data at once
+            logger.info(f"Inserting {len(data)} orders")
+            if data:
+                # Split into chunks to avoid overwhelming the database
+                chunk_size = 1000
+                for i in range(0, len(data), chunk_size):
+                    chunk = data[i:i+chunk_size]
+                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    mapper = inspect(MarketOrders)
+                    session.bulk_insert_mappings(mapper, chunk)
+                    session.commit()
+                    
+            logger.info(f"Orders update completed")
         except Exception as e:
             session.rollback()
             logger.info("*"*100)
             logger.error(f'error: {e} in update_orders')
             logger.info("*"*100)
+            raise
 
     finish = datetime.now()
     orders_time = finish - start
@@ -217,17 +322,33 @@ def update_stats():
 
     start = datetime.now()
 
-    engine = create_engine(mkt_url, echo=False)
+    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
     with Session(engine) as session:
         try:
-            mapper = inspect(MarketStats)
-            session.bulk_insert_mappings(mapper, data)
+            # Clear existing data
+            logger.info(f"Clearing existing stats data")
+            session.execute(text("DELETE FROM marketstats"))
             session.commit()
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} stats records")
+            if data:
+                # Split into chunks
+                chunk_size = 1000
+                for i in range(0, len(data), chunk_size):
+                    chunk = data[i:i+chunk_size]
+                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    mapper = inspect(MarketStats)
+                    session.bulk_insert_mappings(mapper, chunk)
+                    session.commit()
+                    
+            logger.info(f"Stats update completed")
         except Exception as e:
             session.rollback()
             logger.info("*"*100)
             logger.error(f'error: {e} in update_stats')
             logger.info("*"*100)
+            raise
 
     finish = datetime.now()
     stats_time = finish - start
@@ -254,16 +375,32 @@ def update_doctrines():
 
     data = df.to_dict(orient='records')
     try:
-        engine = create_engine(mkt_url,echo=False)    
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})    
         with Session(engine) as session:
-            mapper = inspect(Doctrines)
-            session.bulk_insert_mappings(mapper, data)
+            # Clear existing data
+            logger.info(f"Clearing existing doctrines data")
+            session.execute(text("DELETE FROM doctrines"))
             session.commit()
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} doctrine records")
+            if data:
+                # Split into chunks
+                chunk_size = 1000
+                for i in range(0, len(data), chunk_size):
+                    chunk = data[i:i+chunk_size]
+                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    mapper = inspect(Doctrines)
+                    session.bulk_insert_mappings(mapper, chunk)
+                    session.commit()
+                    
+            logger.info(f"Doctrines update completed")
     except Exception as e:
         session.rollback()
         logger.info("*"*100)
         logger.error(f'error: {e} in update_doctrines')
         logger.info("*"*100)
+        raise
 
     finish = datetime.now()
     doctrines_time = finish - start
@@ -283,11 +420,39 @@ def update_ship_targets():
 
     data = df.to_dict(orient='records')
 
-    engine = create_engine(mkt_url, echo=False)
+    start = datetime.now()
+    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
     with Session(engine) as session:
-        mapper = inspect(ShipTargets)
-        session.bulk_insert_mappings(mapper, data)
-        session.commit()
+        try:
+            # Clear existing data
+            logger.info(f"Clearing existing ship targets data")
+            session.execute(text("DELETE FROM ship_targets"))
+            session.commit()
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} ship target records")
+            if data:
+                # Split into chunks
+                chunk_size = 1000
+                for i in range(0, len(data), chunk_size):
+                    chunk = data[i:i+chunk_size]
+                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    mapper = inspect(ShipTargets)
+                    session.bulk_insert_mappings(mapper, chunk)
+                    session.commit()
+                    
+            logger.info(f"Ship targets update completed")
+        except Exception as e:
+            session.rollback()
+            logger.info("*"*100)
+            logger.error(f'error: {e} in update_ship_targets')
+            logger.info("*"*100)
+            raise
+    
+    finish = datetime.now()
+    ship_time = finish - start
+    logger.info(f"ship targets time: {ship_time}, rows: {len(data)}")
+    logger.info("="*100)
 
 def check_tables():
     logger.info(f"checking tables")
@@ -310,6 +475,33 @@ def check_tables():
     logger.info("="*100)
     return table_dict
 
+def safe_update_operation(operation_func, description, table_dict, table_name, min_rows=1):
+    """Safely perform an update operation with backup and restore on failure."""
+    logger.info(f'Beginning {description}...')
+    
+    if table_dict[table_name] <= min_rows:
+        logger.error(f"{table_name} table has insufficient data ({table_dict[table_name]} rows), skipping update.")
+        return False
+
+    # Create backup before performing the operation
+    backup_file = backup_database()
+    
+    try:
+        # Try to perform the operation with retries
+        retry_operation(operation_func)
+        logger.info(f'{description} completed successfully.')
+        return True
+    except Exception as e:
+        logger.error(f'Error in {description}: {e}')
+        if backup_file:
+            logger.info(f'Attempting to restore database from backup: {backup_file}')
+            if restore_database(backup_file):
+                logger.info(f'Database successfully restored from backup.')
+            else:
+                logger.error(f'Failed to restore database from backup!')
+        else:
+            logger.error(f'No backup available for restore!')
+        return False
 
 def main():
     logger.info(f"starting main")
@@ -326,135 +518,63 @@ def main():
     args = parser.parse_args()
     table_dict = check_tables()
 
-
-
-    if args.hist:
-        engine = create_engine(mkt_url, echo=False)
-        conn = engine.connect()
-        logger.info("Running Brazil update with full history refresh.")
-        if table_dict['new_history'] > 0:
-            conn.execute(text("DROP TABLE IF EXISTS market_history"))
-            conn.commit()
-        else:
-            logger.error("History table is empty, skipping history refresh.")
-    else:
-        logger.info("Running market update in quick mode, saved history data will be used.")
-
     logger.info(f"connecting to database: {mkt_url}")
-
+    
+    # Make sure tables exist
     try:
         engine = create_engine(mkt_url, echo=False)
-        conn = engine.connect()
-        logger.info('removing and recreating tables...')
-        if table_dict['new_stats'] > 1:
-            conn.execute(text("DROP TABLE IF EXISTS marketstats"))
-        else:
-            logger.error("Stats table is empty, skipping stats refresh.")
-        if table_dict['new_orders'] > 1:
-            conn.execute(text("DROP TABLE IF EXISTS marketorders"))
-        else:
-            logger.error("Orders table is empty, skipping orders refresh.")
-        if table_dict['new_doctrines'] > 1:
-            conn.execute(text("DROP TABLE IF EXISTS doctrines"))
-        else:
-            logger.error("Doctrines table is empty, skipping doctrines refresh.")
-        if table_dict['ship_targets'] > 1:
-            conn.execute(text("DROP TABLE IF EXISTS ship_targets"))
-        else:
-            logger.error("Ship targets table is empty, skipping ship targets refresh.")
-        conn.commit()
-        conn.close()
-        logger.info('tables removed')
-
-    except Exception as e:
-        logger.error(f'error: {e}')
-    
-    try:
-        logger.info('creating tables...')
         Base.metadata.create_all(engine)
-        logger.info('tables created')
+        logger.info('Ensured all tables exist')
     except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in create_tables')
-        logger.info("*"*100)
+        logger.error(f'Error ensuring tables exist: {e}')
+        return
 
     logger.info("starting db update...")
     logger.info(f"date: {datetime.now()}\n\n")
     logger.info("="*100)
 
-    #update history
-    if args.hist:
-        try:
+    # Update history if requested
+    if args.hist and table_dict.get('new_history', 0) > 1:
+        safe_update_operation(
+            update_history,
+            'updating table: history',
+            table_dict,
+            'new_history'
+        )
 
-            if table_dict['new_history'] > 1:
-                logger.info('updating table: history')
-                logger.info('-'*100)
-                update_history()
-            else:
-                logger.error("History table is empty, skipping history refresh.")
-        except Exception as e:
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_history, returning to main')
-            logger.info("*"*100)
+    # Update orders
+    safe_update_operation(
+        update_orders,
+        'updating table: orders',
+        table_dict,
+        'new_orders'
+    )
 
-    #update orders
-    try:
+    # Update stats
+    safe_update_operation(
+        update_stats,
+        'updating table: stats',
+        table_dict,
+        'new_stats'
+    )
 
-        if table_dict['new_orders'] > 1:
-            logger.info('updating table: orders')
-            logger.info('-'*100)
-            update_orders()
-        else:
-            logger.error("Orders table is empty, skipping orders refresh.")
-            
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_orders, returning to main')
-        logger.info("*"*100)
+    # Update doctrines
+    safe_update_operation(
+        update_doctrines,
+        'updating table: doctrines',
+        table_dict,
+        'new_doctrines'
+    )
 
-    #update stats
-    try:
+    # Update ship targets
+    safe_update_operation(
+        update_ship_targets,
+        'updating table: ship targets',
+        table_dict,
+        'ship_targets'
+    )
 
-        if table_dict['new_stats'] > 1:
-            logger.info('updating table: stats')
-            logger.info('-'*100)
-            update_stats()
-        else:
-            logger.error("Stats table is empty, skipping stats refresh.")
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_stats, returning to main')
-        logger.info("*"*100)
-
-    #update doctrines
-    try:
-
-        if table_dict['new_doctrines'] > 1:
-            logger.info('updating table: doctrines')
-            logger.info('-'*100)
-            update_doctrines()
-        else:
-            logger.error("Doctrines table is empty, skipping doctrines refresh.")
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_doctrines, returning to main')
-        logger.info("*"*100)
-
-    logger.info('-'*100)
-
-    #update ship targets
-    try:
-        
-        if table_dict['ship_targets'] > 1:
-            logger.info('updating table: ship targets')
-            logger.info('-'*100)    
-            update_ship_targets()
-        else:
-            logger.error("Ship targets table is empty, skipping ship targets refresh.")
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_ship_targets, returning to main')
-        logger.info("*"*100)
+    logger.info("Database update process completed.")
 
 if __name__ == "__main__":
     main()
