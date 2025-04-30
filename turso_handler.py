@@ -3,7 +3,7 @@ import libsql_experimental as libsql
 import pandas as pd
 import os
 import shutil
-import time
+import time as time_module  # Rename to avoid conflict with datetime.time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, select, text, inspect, Table
 from sqlalchemy.orm import Session, base, DeclarativeBase, sessionmaker
@@ -53,6 +53,97 @@ fly_sde_local = "sde.db"
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
+def handle_null_columns(df, model_class):
+    """
+    Detects and handles completely null columns in a DataFrame.
+    
+    Args:
+        df (pd.DataFrame): The DataFrame to check
+        model_class: The SQLAlchemy model class to check against
+        
+    Returns:
+        pd.DataFrame: DataFrame with null columns handled appropriately
+    """
+    logger.info(f"Checking for null columns in dataframe with {len(df)} rows")
+    
+    # Get column info from model
+    model_columns = {}
+    for column in inspect(model_class).columns:
+        model_columns[column.key] = {
+            'nullable': column.nullable,
+            'type': str(column.type),
+            'default': column.default,
+        }
+    
+    # Check for completely null columns
+    null_columns = []
+    for col in df.columns:
+        if col in model_columns and df[col].isna().all():
+            null_columns.append(col)
+    
+    if null_columns:
+        logger.warning(f"Found completely null columns: {null_columns}")
+        
+        # Handle each null column based on its SQLAlchemy type
+        for col in null_columns:
+            col_info = model_columns.get(col, {})
+            col_type = col_info.get('type', '')
+            
+            # If column is not nullable in the model, we need to provide a default value
+            if not col_info.get('nullable', True):
+                logger.warning(f"Column {col} is not nullable, must provide default values")
+                
+                # Handle different data types
+                if 'INT' in col_type.upper():
+                    df[col] = 0
+                    logger.info(f"Set default value 0 for integer column: {col}")
+                elif 'FLOAT' in col_type.upper() or 'DOUBLE' in col_type.upper() or 'REAL' in col_type.upper():
+                    df[col] = 0.0
+                    logger.info(f"Set default value 0.0 for float column: {col}")
+                elif 'VARCHAR' in col_type.upper() or 'TEXT' in col_type.upper() or 'CHAR' in col_type.upper():
+                    df[col] = ''
+                    logger.info(f"Set default value '' for string column: {col}")
+                elif 'DATETIME' in col_type.upper() or 'TIMESTAMP' in col_type.upper():
+                    df[col] = datetime.now()
+                    logger.info(f"Set default value current timestamp for datetime column: {col}")
+                elif 'BOOLEAN' in col_type.upper():
+                    df[col] = False
+                    logger.info(f"Set default value False for boolean column: {col}")
+                else:
+                    logger.warning(f"Unknown column type {col_type} for {col}, setting to None")
+            else:
+                logger.info(f"Column {col} is nullable, keeping as NULL/None")
+    
+    # Check for required columns that are missing
+    required_columns = [col for col, info in model_columns.items() 
+                        if not info.get('nullable', True) and col not in df.columns]
+    
+    if required_columns:
+        logger.warning(f"Missing required columns: {required_columns}")
+        
+        # Add missing required columns with default values
+        for col in required_columns:
+            col_info = model_columns.get(col, {})
+            col_type = col_info.get('type', '')
+            
+            # Set defaults based on column type
+            if 'INT' in col_type.upper():
+                df[col] = 0
+            elif 'FLOAT' in col_type.upper() or 'DOUBLE' in col_type.upper() or 'REAL' in col_type.upper():
+                df[col] = 0.0
+            elif 'VARCHAR' in col_type.upper() or 'TEXT' in col_type.upper() or 'CHAR' in col_type.upper():
+                df[col] = ''
+            elif 'DATETIME' in col_type.upper() or 'TIMESTAMP' in col_type.upper():
+                df[col] = datetime.now()
+            elif 'BOOLEAN' in col_type.upper():
+                df[col] = False
+            else:
+                df[col] = None
+                
+            logger.info(f"Added missing required column {col} with default value")
+    
+    return df
+
 def retry_operation(operation_func, *args, **kwargs):
     """Retry an operation with exponential backoff."""
     for attempt in range(MAX_RETRIES):
@@ -62,7 +153,7 @@ def retry_operation(operation_func, *args, **kwargs):
             if attempt < MAX_RETRIES - 1:
                 wait_time = RETRY_DELAY * (2 ** attempt)
                 logger.warning(f"Operation failed: {e}. Retrying in {wait_time} seconds... (Attempt {attempt+1}/{MAX_RETRIES})")
-                time.sleep(wait_time)
+                time_module.sleep(wait_time)
             else:
                 logger.error(f"Operation failed after {MAX_RETRIES} attempts: {e}")
                 raise
@@ -215,6 +306,10 @@ def update_history():
     df = pd.read_csv(new_history)
     df.date = pd.to_datetime(df.date)
     df.timestamp = pd.to_datetime(df.timestamp)
+    
+    # Handle null columns
+    df = handle_null_columns(df, MarketHistory)
+    
     data = df.to_dict(orient='records')
 
     engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
@@ -270,6 +365,9 @@ def update_orders():
     valid_columns = [column.key for column in inspect(MarketOrders).columns]
     df = df[df.columns.intersection(valid_columns)]
     
+    # Handle null columns
+    df = handle_null_columns(df, MarketOrders)
+    
     data = df.to_dict(orient='records')
 
     engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
@@ -315,9 +413,11 @@ def update_stats():
     df.last_update = pd.to_datetime(df.last_update)
 
     # Rename avg_vol column to avg_volume to match the database model
-    logger.info("Column names before renaming: %s", df.columns.tolist())
     df = df.rename(columns={'avg_vol': 'avg_volume'})
-    logger.info("Column names after renaming: %s", df.columns.tolist())
+    
+    # Handle null columns
+    df = handle_null_columns(df, MarketStats)
+    
     data = df.to_dict(orient='records')
 
     start = datetime.now()
@@ -372,6 +472,9 @@ def update_doctrines():
     df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
     df.timestamp = pd.to_datetime(df.timestamp)
     df.rename(columns={'4H_price':'price'}, inplace=True)
+    
+    # Handle null columns
+    df = handle_null_columns(df, Doctrines)
 
     data = df.to_dict(orient='records')
     try:
@@ -415,44 +518,104 @@ def update_ship_targets():
     logger.info(f"updating ship targets")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
-    df = pd.read_csv(ship_targets)
-    df.created_at = pd.to_datetime(df.created_at)
-
-    data = df.to_dict(orient='records')
-
-    start = datetime.now()
-    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-    with Session(engine) as session:
-        try:
-            # Clear existing data
-            logger.info(f"Clearing existing ship targets data")
-            session.execute(text("DELETE FROM ship_targets"))
-            session.commit()
-            
-            # Insert new data in chunks
-            logger.info(f"Inserting {len(data)} ship target records")
-            if data:
-                # Split into chunks
-                chunk_size = 1000
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i+chunk_size]
-                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
-                    mapper = inspect(ShipTargets)
-                    session.bulk_insert_mappings(mapper, chunk)
-                    session.commit()
-                    
-            logger.info(f"Ship targets update completed")
-        except Exception as e:
-            session.rollback()
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_ship_targets')
-            logger.info("*"*100)
-            raise
     
-    finish = datetime.now()
-    ship_time = finish - start
-    logger.info(f"ship targets time: {ship_time}, rows: {len(data)}")
-    logger.info("="*100)
+    try:
+        df = pd.read_csv(ship_targets)
+        df.created_at = pd.to_datetime(df.created_at)
+        
+        # Ensure id column is unique and sequential
+        # First check if id is in the DataFrame
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        else:
+            # Add an id column if it doesn't exist
+            df.insert(0, 'id', range(1, len(df) + 1))
+        
+        # Handle null columns
+        df = handle_null_columns(df, ShipTargets)
+        
+        # Validate that we have data before proceeding
+        if df.empty:
+            logger.error("Ship targets dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in ship targets data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
+            
+        logger.info(f"Prepared {len(data)} ship target records for insertion")
+    
+        start = datetime.now()
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        
+        # First fetch existing data as a backup
+        current_data = []
+        with Session(engine) as session:
+            query_result = session.execute(text("SELECT * FROM ship_targets")).fetchall()
+            if query_result:
+                current_data = [dict(row._mapping) for row in query_result]
+                logger.info(f"Backed up {len(current_data)} existing ship target records in memory")
+        
+        with Session(engine) as session:
+            try:
+                # Clear existing data only after we've validated new data and backed up existing data
+                logger.info(f"Clearing existing ship targets data")
+                session.execute(text("DELETE FROM ship_targets"))
+                session.commit()
+                
+                # Insert new data in chunks
+                logger.info(f"Inserting {len(data)} ship target records")
+                if data:
+                    # Split into chunks to avoid overwhelming the database
+                    chunk_size = 1000
+                    for i in range(0, len(data), chunk_size):
+                        chunk = data[i:i+chunk_size]
+                        logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                        mapper = inspect(ShipTargets)
+                        session.bulk_insert_mappings(mapper, chunk)
+                        session.commit()
+                        
+                logger.info(f"Ship targets update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_ship_targets')
+                logger.info("*"*100)
+                
+                # Restore from in-memory backup if available
+                if current_data:
+                    try:
+                        logger.info(f"Attempting to restore {len(current_data)} records from in-memory backup")
+                        # Clear any partial data
+                        session.execute(text("DELETE FROM ship_targets"))
+                        session.commit()
+                        
+                        # Reinsert the original data
+                        if current_data:
+                            # Split into chunks for the restore too
+                            chunk_size = 1000
+                            for i in range(0, len(current_data), chunk_size):
+                                chunk = current_data[i:i+chunk_size]
+                                mapper = inspect(ShipTargets)
+                                session.bulk_insert_mappings(mapper, chunk)
+                                session.commit()
+                            logger.info(f"Successfully restored original data from in-memory backup")
+                    except Exception as restore_error:
+                        session.rollback()
+                        logger.error(f"Failed to restore from in-memory backup: {restore_error}")
+                
+                raise
+        
+        finish = datetime.now()
+        ship_time = finish - start
+        logger.info(f"ship targets time: {ship_time}, rows: {len(data)}")
+        logger.info("="*100)
+        
+    except Exception as e:
+        logger.error(f"Failed to update ship targets: {e}")
+        raise  # Re-raise to let the safe_update_operation handle it
 
 def check_tables():
     logger.info(f"checking tables")
@@ -482,9 +645,15 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
     if table_dict[table_name] <= min_rows:
         logger.error(f"{table_name} table has insufficient data ({table_dict[table_name]} rows), skipping update.")
         return False
-
+    
     # Create backup before performing the operation
-    backup_file = backup_database()
+    try:
+        backup_file = backup_database()
+        if not backup_file:
+            logger.warning("Failed to create database backup. Proceeding without backup.")
+    except Exception as e:
+        logger.error(f"Error creating database backup: {e}")
+        backup_file = None
     
     try:
         # Try to perform the operation with retries
@@ -494,11 +663,14 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
     except Exception as e:
         logger.error(f'Error in {description}: {e}')
         if backup_file:
-            logger.info(f'Attempting to restore database from backup: {backup_file}')
-            if restore_database(backup_file):
-                logger.info(f'Database successfully restored from backup.')
-            else:
-                logger.error(f'Failed to restore database from backup!')
+            try:
+                logger.info(f'Attempting to restore database from backup: {backup_file}')
+                if restore_database(backup_file):
+                    logger.info(f'Database successfully restored from backup.')
+                else:
+                    logger.error(f'Failed to restore database from backup!')
+            except Exception as restore_error:
+                logger.error(f"Error during database restore: {restore_error}")
         else:
             logger.error(f'No backup available for restore!')
         return False
