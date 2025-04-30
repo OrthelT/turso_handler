@@ -53,6 +53,9 @@ fly_sde_local = "sde.db"
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
+# Updated chunk size to avoid message size limit errors
+CHUNK_SIZE = 100  # Reduced from 1000 to avoid message size limit errors
+
 def handle_null_columns(df, model_class):
     """
     Detects and handles completely null columns in a DataFrame.
@@ -303,216 +306,364 @@ def update_history():
     logger.info(f"updating history")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
-    df = pd.read_csv(new_history)
-    df.date = pd.to_datetime(df.date)
-    df.timestamp = pd.to_datetime(df.timestamp)
     
-    # Handle null columns
-    df = handle_null_columns(df, MarketHistory)
-    
-    data = df.to_dict(orient='records')
-
-    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-    start = datetime.now()
-    
-    with Session(engine) as session:
-        try:
-            # Clear existing data
-            logger.info(f"Clearing existing history data")
-            session.execute(text("DELETE FROM market_history"))
-            session.commit()
+    try:
+        df = pd.read_csv(new_history)
+        df.date = pd.to_datetime(df.date)
+        df.timestamp = pd.to_datetime(df.timestamp)
+        
+        # Ensure id column is unique and sequential
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        else:
+            # Add an id column if it doesn't exist
+            df.insert(0, 'id', range(1, len(df) + 1))
+        
+        # Handle null columns
+        df = handle_null_columns(df, MarketHistory)
+        
+        # Validate that we have data before proceeding
+        if df.empty:
+            logger.error("History dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in history data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
             
-            # Insert new data in chunks
-            logger.info(f"Inserting {len(data)} history records")
-            if data:
-                # Split into chunks
-                chunk_size = 1000
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i+chunk_size]
-                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
-                    mapper = inspect(MarketHistory)
-                    session.bulk_insert_mappings(mapper, chunk)
-                    session.commit()
-                    
-            logger.info(f"History update completed")
-        except Exception as e:
-            session.rollback()
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_history')
-            logger.info("*"*100)
-            raise
+        logger.info(f"Prepared {len(data)} history records for insertion")
     
-    finish = datetime.now()
-    history_time = finish - start
-    logger.info(f"history time: {history_time}, rows: {len(data)}")
-    logger.info("="*100)
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        start = datetime.now()
+        
+        # Only store record count, not full data (to avoid memory issues)
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM market_history")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing history records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+        
+        with Session(engine) as session:
+            try:
+                # Only delete if we have new data
+                logger.info(f"Clearing existing history data")
+                session.execute(text("DELETE FROM market_history"))
+                session.commit()
+                
+                # Insert new data in chunks
+                logger.info(f"Inserting {len(data)} history records")
+                if data:
+                    # Split into chunks
+                    for i in range(0, len(data), CHUNK_SIZE):
+                        chunk = data[i:i+CHUNK_SIZE]
+                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
+                        mapper = inspect(MarketHistory)
+                        session.bulk_insert_mappings(mapper, chunk)
+                        session.commit()
+                        
+                logger.info(f"History update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_history')
+                logger.info("*"*100)
+                
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} history records - they were not backed up in memory")
+                
+                raise
+        
+        finish = datetime.now()
+        history_time = finish - start
+        logger.info(f"history time: {history_time}, rows: {len(data)}")
+        logger.info("="*100)
+        
+    except Exception as e:
+        logger.error(f"Failed to update history: {e}")
+        raise
 
 def update_orders():
     logger.info(f"updating orders")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
-
-    df = pd.read_csv(new_orderscsv)
-    df.issued = pd.to_datetime(df.issued)
     
-    # Replace inf and NaN values with None/NULL
-    df = df.replace([np.inf, -np.inf], None)
-    df = df.replace(np.nan, None)
-    
-    df.infer_objects()
-    
-    # Get only the columns that exist in the MarketOrders model
-    valid_columns = [column.key for column in inspect(MarketOrders).columns]
-    df = df[df.columns.intersection(valid_columns)]
-    
-    # Handle null columns
-    df = handle_null_columns(df, MarketOrders)
-    
-    data = df.to_dict(orient='records')
-
-    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-    start = datetime.now()
-
-    with Session(engine) as session:
-        try:
-            # First clear the existing data - more efficient for large updates
-            logger.info(f"Clearing existing orders data")
-            session.execute(text("DELETE FROM marketorders"))
-            session.commit()
+    try:
+        df = pd.read_csv(new_orderscsv)
+        df.issued = pd.to_datetime(df.issued)
+        
+        # Replace inf and NaN values with None/NULL
+        df = df.replace([np.inf, -np.inf], None)
+        df = df.replace(np.nan, None)
+        
+        df.infer_objects()
+        
+        # Check if we need to add an ID column
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        elif 'order_id' not in df.columns:
+            # Only add an id if there's no order_id (which might be the primary key)
+            df.insert(0, 'id', range(1, len(df) + 1))
+        
+        # Get only the columns that exist in the MarketOrders model
+        valid_columns = [column.key for column in inspect(MarketOrders).columns]
+        df = df[df.columns.intersection(valid_columns)]
+        
+        # Handle null columns
+        df = handle_null_columns(df, MarketOrders)
+        
+        # Validate data
+        if df.empty:
+            logger.error("Orders dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in orders data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
             
-            # Then bulk insert all the new data at once
-            logger.info(f"Inserting {len(data)} orders")
-            if data:
-                # Split into chunks to avoid overwhelming the database
-                chunk_size = 1000
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i+chunk_size]
-                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
-                    mapper = inspect(MarketOrders)
-                    session.bulk_insert_mappings(mapper, chunk)
-                    session.commit()
-                    
-            logger.info(f"Orders update completed")
-        except Exception as e:
-            session.rollback()
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_orders')
-            logger.info("*"*100)
-            raise
-
-    finish = datetime.now()
-    orders_time = finish - start
-    logger.info(f"orders time: {orders_time}, rows: {len(data)}")
-    logger.info("="*100)
+        logger.info(f"Prepared {len(data)} order records for insertion")
+    
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        start = datetime.now()
+        
+        # Only store record count, not full data (to avoid memory issues)
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM marketorders")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing order records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+    
+        with Session(engine) as session:
+            try:
+                # First clear the existing data - more efficient for large updates
+                logger.info(f"Clearing existing orders data")
+                session.execute(text("DELETE FROM marketorders"))
+                session.commit()
+                
+                # Then bulk insert all the new data at once
+                logger.info(f"Inserting {len(data)} orders")
+                if data:
+                    # Split into smaller chunks to avoid exceeding message size limits
+                    for i in range(0, len(data), CHUNK_SIZE):
+                        chunk = data[i:i+CHUNK_SIZE]
+                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
+                        mapper = inspect(MarketOrders)
+                        session.bulk_insert_mappings(mapper, chunk)
+                        session.commit()
+                        
+                logger.info(f"Orders update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_orders')
+                logger.info("*"*100)
+                
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} order records - they were not backed up in memory")
+                
+                raise
+    
+        finish = datetime.now()
+        orders_time = finish - start
+        logger.info(f"orders time: {orders_time}, rows: {len(data)}")
+        logger.info("="*100)
+        
+    except Exception as e:
+        logger.error(f"Failed to update orders: {e}")
+        raise
 
 def update_stats():
     logger.info(f"updating stats")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
-    df = pd.read_csv(new_stats)
-    df.last_update = pd.to_datetime(df.last_update)
-
-    # Rename avg_vol column to avg_volume to match the database model
-    df = df.rename(columns={'avg_vol': 'avg_volume'})
     
-    # Handle null columns
-    df = handle_null_columns(df, MarketStats)
+    try:
+        df = pd.read_csv(new_stats)
+        df.last_update = pd.to_datetime(df.last_update)
     
-    data = df.to_dict(orient='records')
-
-    start = datetime.now()
-
-    engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-    with Session(engine) as session:
-        try:
-            # Clear existing data
-            logger.info(f"Clearing existing stats data")
-            session.execute(text("DELETE FROM marketstats"))
-            session.commit()
-            
-            # Insert new data in chunks
-            logger.info(f"Inserting {len(data)} stats records")
-            if data:
-                # Split into chunks
-                chunk_size = 1000
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i+chunk_size]
-                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
-                    mapper = inspect(MarketStats)
-                    session.bulk_insert_mappings(mapper, chunk)
-                    session.commit()
-                    
-            logger.info(f"Stats update completed")
-        except Exception as e:
-            session.rollback()
-            logger.info("*"*100)
-            logger.error(f'error: {e} in update_stats')
-            logger.info("*"*100)
-            raise
-
-    finish = datetime.now()
-    stats_time = finish - start
-    logger.info(f"stats time: {stats_time}, rows: {len(data)}")
-    logger.info("="*100)
+        # Rename avg_vol column to avg_volume to match the database model
+        df = df.rename(columns={'avg_vol': 'avg_volume'})
+        
+        # Ensure id column is unique and sequential
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        else:
+            # Add an id column if it doesn't exist (and type_id isn't the primary key)
+            if 'type_id' not in df.columns or not inspect(MarketStats).primary_key[0].name == 'type_id':
+                df.insert(0, 'id', range(1, len(df) + 1))
+        
+        # Handle null columns
+        df = handle_null_columns(df, MarketStats)
+        
+        # Validate data
+        if df.empty:
+            logger.error("Stats dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in stats data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
+        
+        logger.info(f"Prepared {len(data)} stats records for insertion")
+    
+        start = datetime.now()
+    
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        
+        # Only store record count, not full data (to avoid memory issues)
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM marketstats")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing stat records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+                
+        with Session(engine) as session:
+            try:
+                # Clear existing data
+                logger.info(f"Clearing existing stats data")
+                session.execute(text("DELETE FROM marketstats"))
+                session.commit()
+                
+                # Insert new data in chunks
+                logger.info(f"Inserting {len(data)} stats records")
+                if data:
+                    # Split into smaller chunks
+                    for i in range(0, len(data), CHUNK_SIZE):
+                        chunk = data[i:i+CHUNK_SIZE]
+                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
+                        mapper = inspect(MarketStats)
+                        session.bulk_insert_mappings(mapper, chunk)
+                        session.commit()
+                        
+                logger.info(f"Stats update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_stats')
+                logger.info("*"*100)
+                
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} stat records - they were not backed up in memory")
+                
+                raise
+    
+        finish = datetime.now()
+        stats_time = finish - start
+        logger.info(f"stats time: {stats_time}, rows: {len(data)}")
+        logger.info("="*100)
+        
+    except Exception as e:
+        logger.error(f"Failed to update stats: {e}")
+        raise
 
 def update_doctrines():
-    start = datetime.now()
     logger.info(f"""
                 {'='*100}
                 updating doctrines table
                 {'-'*100}
                 """)
-    df = pd.read_csv(new_doctrines)
-    idrange = range(1,len(df)+1)
-    df['id'] = idrange
-
-    df = df.sort_values(by='timestamp', ascending=False)
-    df.reset_index(drop=True, inplace=True)
-    ts = df.timestamp[0]
-    df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
-    df.timestamp = pd.to_datetime(df.timestamp)
-    df.rename(columns={'4H_price':'price'}, inplace=True)
-    
-    # Handle null columns
-    df = handle_null_columns(df, Doctrines)
-
-    data = df.to_dict(orient='records')
+                
     try:
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})    
-        with Session(engine) as session:
-            # Clear existing data
-            logger.info(f"Clearing existing doctrines data")
-            session.execute(text("DELETE FROM doctrines"))
-            session.commit()
+        start = datetime.now()
+        df = pd.read_csv(new_doctrines)
+        
+        # Already has a good ID strategy, but let's ensure it's 1-based
+        idrange = range(1, len(df) + 1)
+        df['id'] = idrange
+    
+        df = df.sort_values(by='timestamp', ascending=False)
+        df.reset_index(drop=True, inplace=True)
+        ts = df.timestamp[0]
+        df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
+        df.timestamp = pd.to_datetime(df.timestamp)
+        df.rename(columns={'4H_price':'price'}, inplace=True)
+        
+        # Handle null columns
+        df = handle_null_columns(df, Doctrines)
+        
+        # Validate data
+        if df.empty:
+            logger.error("Doctrines dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in doctrines data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
             
-            # Insert new data in chunks
-            logger.info(f"Inserting {len(data)} doctrine records")
-            if data:
-                # Split into chunks
-                chunk_size = 1000
-                for i in range(0, len(data), chunk_size):
-                    chunk = data[i:i+chunk_size]
-                    logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
-                    mapper = inspect(Doctrines)
-                    session.bulk_insert_mappings(mapper, chunk)
-                    session.commit()
-                    
-            logger.info(f"Doctrines update completed")
+        logger.info(f"Prepared {len(data)} doctrine records for insertion")
+        
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        
+        # Only store record count, not full data
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM doctrines")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing doctrine records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+                
+        with Session(engine) as session:
+            try:
+                # Clear existing data
+                logger.info(f"Clearing existing doctrines data")
+                session.execute(text("DELETE FROM doctrines"))
+                session.commit()
+                
+                # Insert new data in chunks
+                logger.info(f"Inserting {len(data)} doctrine records")
+                if data:
+                    # Split into smaller chunks
+                    for i in range(0, len(data), CHUNK_SIZE):
+                        chunk = data[i:i+CHUNK_SIZE]
+                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
+                        mapper = inspect(Doctrines)
+                        session.bulk_insert_mappings(mapper, chunk)
+                        session.commit()
+                        
+                logger.info(f"Doctrines update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_doctrines')
+                logger.info("*"*100)
+                
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} doctrine records - they were not backed up in memory")
+                
+                raise
+    
+        finish = datetime.now()
+        doctrines_time = finish - start
+    
+        logger.info(f"""
+                    {'-'*100}
+                    doctrines time: {doctrines_time}, rows: {len(data)}
+                    {'='*100}
+                    """)
     except Exception as e:
-        session.rollback()
-        logger.info("*"*100)
-        logger.error(f'error: {e} in update_doctrines')
-        logger.info("*"*100)
+        logger.error(f"Failed to update doctrines: {e}")
         raise
-
-    finish = datetime.now()
-    doctrines_time = finish - start
-
-    logger.info(f"""
-                {'-'*100}
-                doctrines time: {doctrines_time}, rows: {len(data)}
-                {'='*100}
-                """)
 
 def update_ship_targets():
     logger.info(f"updating ship targets")
@@ -550,17 +701,19 @@ def update_ship_targets():
         start = datetime.now()
         engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
         
-        # First fetch existing data as a backup
-        current_data = []
+        # Only store record count, not full data
+        record_count = 0
         with Session(engine) as session:
-            query_result = session.execute(text("SELECT * FROM ship_targets")).fetchall()
-            if query_result:
-                current_data = [dict(row._mapping) for row in query_result]
-                logger.info(f"Backed up {len(current_data)} existing ship target records in memory")
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM ship_targets")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing ship target records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
         
         with Session(engine) as session:
             try:
-                # Clear existing data only after we've validated new data and backed up existing data
+                # Clear existing data only after we've validated new data
                 logger.info(f"Clearing existing ship targets data")
                 session.execute(text("DELETE FROM ship_targets"))
                 session.commit()
@@ -568,11 +721,10 @@ def update_ship_targets():
                 # Insert new data in chunks
                 logger.info(f"Inserting {len(data)} ship target records")
                 if data:
-                    # Split into chunks to avoid overwhelming the database
-                    chunk_size = 1000
-                    for i in range(0, len(data), chunk_size):
-                        chunk = data[i:i+chunk_size]
-                        logger.info(f"Processing chunk {i//chunk_size + 1}/{len(data)//chunk_size + 1} ({len(chunk)} records)")
+                    # Split into smaller chunks
+                    for i in range(0, len(data), CHUNK_SIZE):
+                        chunk = data[i:i+CHUNK_SIZE]
+                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
                         mapper = inspect(ShipTargets)
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
@@ -584,27 +736,9 @@ def update_ship_targets():
                 logger.error(f'error: {e} in update_ship_targets')
                 logger.info("*"*100)
                 
-                # Restore from in-memory backup if available
-                if current_data:
-                    try:
-                        logger.info(f"Attempting to restore {len(current_data)} records from in-memory backup")
-                        # Clear any partial data
-                        session.execute(text("DELETE FROM ship_targets"))
-                        session.commit()
-                        
-                        # Reinsert the original data
-                        if current_data:
-                            # Split into chunks for the restore too
-                            chunk_size = 1000
-                            for i in range(0, len(current_data), chunk_size):
-                                chunk = current_data[i:i+chunk_size]
-                                mapper = inspect(ShipTargets)
-                                session.bulk_insert_mappings(mapper, chunk)
-                                session.commit()
-                            logger.info(f"Successfully restored original data from in-memory backup")
-                    except Exception as restore_error:
-                        session.rollback()
-                        logger.error(f"Failed to restore from in-memory backup: {restore_error}")
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} ship target records - they were not backed up in memory")
                 
                 raise
         
@@ -615,7 +749,7 @@ def update_ship_targets():
         
     except Exception as e:
         logger.error(f"Failed to update ship targets: {e}")
-        raise  # Re-raise to let the safe_update_operation handle it
+        raise
 
 def check_tables():
     logger.info(f"checking tables")
