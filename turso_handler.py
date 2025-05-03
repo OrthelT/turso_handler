@@ -54,7 +54,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
 # Updated chunk size to avoid message size limit errors
-CHUNK_SIZE = 100  # Reduced from 1000 to avoid message size limit errors
+CHUNK_SIZE = 500  # increased from 100 to 500 to improve performance
 
 def handle_null_columns(df, model_class):
     """
