@@ -1,7 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 
-def setup_logging(log_name="turso_handler2", log_file="logs/turso_handler3.log", level=logging.INFO, max_bytes=5*1024*1024, backup_count=3):
+def setup_logging(log_name="turso_handler2", log_file="logs/turso_handler4.log", level=logging.INFO, max_bytes=5*1024*1024, backup_count=3):
     """Set up logging configuration with a rotating file handler and a stream handler."""
     logger = logging.getLogger(log_name)
     # Clear existing handlers to avoid duplicate logs
