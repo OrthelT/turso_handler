@@ -16,7 +16,7 @@ import numpy as np
 
 from logging.handlers import RotatingFileHandler
 from logging_config import setup_logging
-from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets
+from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets, DoctrineMap
 
 logger = setup_logging()
 
@@ -28,6 +28,8 @@ new_stats = f"{path_begin}/eveESO/output/brazil/new_stats.csv"
 watchlist = f"{path_begin}/eveESO/output/brazil/watchlist.csv"
 new_orderscsv = f"{path_begin}/eveESO/output/brazil/new_orders.csv"
 new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
+doctrine_map = f"{path_begin}/eveESO/output/brazil/doctrine_map.csv"
+
 ship_targets = f"{path_begin}/eveESO/data/ship_targets2.csv"
 path = f"{path_begin}/eveESO/output/brazil/"
 ship_targets_path = f"{path_begin}/eveESO/data/ship_targets.csv"
@@ -352,8 +354,12 @@ def update_history():
             try:
                 # Only delete if we have new data
                 logger.info(f"Clearing existing history data")
-                session.execute(text("DELETE FROM market_history"))
-                session.commit()
+                try:
+                    session.execute(text("DELETE FROM market_history"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear market_history table: {e}")
+                    session.rollback()
                 
                 # Insert new data in chunks
                 logger.info(f"Inserting {len(data)} history records")
@@ -447,8 +453,12 @@ def update_orders():
             try:
                 # First clear the existing data - more efficient for large updates
                 logger.info(f"Clearing existing orders data")
-                session.execute(text("DELETE FROM marketorders"))
-                session.commit()
+                try:
+                    session.execute(text("DELETE FROM marketorders"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear marketorders table: {e}")
+                    session.rollback()
                 
                 # Then bulk insert all the new data at once
                 logger.info(f"Inserting {len(data)} orders")
@@ -537,8 +547,12 @@ def update_stats():
             try:
                 # Clear existing data
                 logger.info(f"Clearing existing stats data")
-                session.execute(text("DELETE FROM marketstats"))
-                session.commit()
+                try:
+                    session.execute(text("DELETE FROM marketstats"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear marketstats table: {e}")
+                    session.rollback()
                 
                 # Insert new data in chunks
                 logger.info(f"Inserting {len(data)} stats records")
@@ -626,8 +640,12 @@ def update_doctrines():
             try:
                 # Clear existing data
                 logger.info(f"Clearing existing doctrines data")
-                session.execute(text("DELETE FROM doctrines"))
-                session.commit()
+                try:
+                    session.execute(text("DELETE FROM doctrines"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear doctrines table: {e}")
+                    session.rollback()
                 
                 # Insert new data in chunks
                 logger.info(f"Inserting {len(data)} doctrine records")
@@ -715,8 +733,12 @@ def update_ship_targets():
             try:
                 # Clear existing data only after we've validated new data
                 logger.info(f"Clearing existing ship targets data")
-                session.execute(text("DELETE FROM ship_targets"))
-                session.commit()
+                try:
+                    session.execute(text("DELETE FROM ship_targets"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear ship_targets table: {e}")
+                    session.rollback()
                 
                 # Insert new data in chunks
                 logger.info(f"Inserting {len(data)} ship target records")
@@ -751,6 +773,92 @@ def update_ship_targets():
         logger.error(f"Failed to update ship targets: {e}")
         raise
 
+def update_doctrine_map():
+    logger.info(f"updating doctrine map")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+    
+    try:
+        df = pd.read_csv(doctrine_map)
+        
+        # Ensure id column is unique and sequential
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        else:
+            # Add an id column if it doesn't exist
+            df.insert(0, 'id', range(1, len(df) + 1))
+        
+        # Handle null columns
+        df = handle_null_columns(df, DoctrineMap)
+        
+        # Validate that we have data before proceeding
+        if df.empty:
+            logger.error("Doctrine map dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in doctrine map data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
+            
+        logger.info(f"Prepared {len(data)} doctrine map records for insertion")
+    
+        start = datetime.now()
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        
+        # Only store record count, not full data
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM doctrine_map")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing doctrine map records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+        
+        with Session(engine) as session:
+            try:
+                # Clear existing data only after we've validated new data
+                logger.info(f"Clearing existing doctrine map data")
+                try:
+                    session.execute(text("DELETE FROM doctrine_map"))
+                    session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not clear doctrine_map table: {e}")
+                    session.rollback()
+                
+                # Insert new data in chunks
+                logger.info(f"Inserting {len(data)} doctrine map records")
+                if data:
+                    # Doctrine map is small, no need to chunk
+                    logger.info(f"Processing all {len(data)} records at once")
+                    mapper = inspect(DoctrineMap)
+                    session.bulk_insert_mappings(mapper, data)
+                    session.commit()
+                        
+                logger.info(f"Doctrine map update completed")
+            except Exception as e:
+                session.rollback()
+                logger.info("*"*100)
+                logger.error(f'error: {e} in update_doctrine_map')
+                logger.info("*"*100)
+                
+                # Log that we can't restore because we didn't keep the full backup
+                if record_count > 0:
+                    logger.error(f"Cannot restore {record_count} doctrine map records - they were not backed up in memory")
+                
+                raise
+        
+        finish = datetime.now()
+        doctrine_map_time = finish - start
+        logger.info(f"doctrine map time: {doctrine_map_time}, rows: {len(data)}")
+        logger.info("="*100)
+        
+    except Exception as e:
+        logger.error(f"Failed to update doctrine map: {e}")
+        raise
+
 def check_tables():
     logger.info(f"checking tables")
     logger.info(f"date: {datetime.now()}")
@@ -769,6 +877,16 @@ def check_tables():
             logger.info(f"{table_name}: {len(df)}")
     df = pd.read_csv(ship_targets_path)
     table_dict['ship_targets'] = len(df)
+    
+    # Add doctrine_map to table_dict
+    try:
+        df = pd.read_csv(doctrine_map)
+        table_dict['doctrine_map'] = len(df)
+        logger.info(f"doctrine_map: {len(df)}")
+    except Exception as e:
+        logger.warning(f"Could not read doctrine_map: {e}")
+        table_dict['doctrine_map'] = 0
+        
     logger.info("="*100)
     return table_dict
 
@@ -878,6 +996,14 @@ def main():
         'updating table: ship targets',
         table_dict,
         'ship_targets'
+    )
+
+    # Update doctrine map
+    safe_update_operation(
+        update_doctrine_map,
+        'updating table: doctrine map',
+        table_dict,
+        'doctrine_map'
     )
 
     logger.info("Database update process completed.")

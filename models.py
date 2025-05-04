@@ -141,3 +141,15 @@ class ShipTargets(Base):
         ship_target={self.ship_target!r},
         created_at={self.created_at!r}
         )"""
+
+class DoctrineMap(Base):
+    __tablename__ = "doctrine_map"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doctrine_id: Mapped[int] = mapped_column(Integer)
+    fitting_id: Mapped[int] = mapped_column(Integer)
+
+    def __repr__(self) -> str:
+        f"""doctrine_map(
+        doctrine_id={self.doctrine_id!r},
+        fitting_id={self.fitting_id!r}
+        )"""
