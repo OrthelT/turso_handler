@@ -57,6 +57,8 @@ RETRY_DELAY = 2  # seconds
 
 # Updated chunk size to avoid message size limit errors
 CHUNK_SIZE = 500  # increased from 100 to 500 to improve performance
+reporting_ok = []
+reporting_failed = []
 
 def handle_null_columns(df, model_class):
     """
@@ -896,6 +898,7 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
     
     if table_dict[table_name] <= min_rows:
         logger.error(f"{table_name} table has insufficient data ({table_dict[table_name]} rows), skipping update.")
+        reporting_failed.append(table_name)
         return False
     
     # Create backup before performing the operation
@@ -911,9 +914,11 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
         # Try to perform the operation with retries
         retry_operation(operation_func)
         logger.info(f'{description} completed successfully.')
+        reporting_ok.append(table_name)
         return True
     except Exception as e:
         logger.error(f'Error in {description}: {e}')
+        reporting_failed.append(table_name)
         if backup_file:
             try:
                 logger.info(f'Attempting to restore database from backup: {backup_file}')
@@ -1007,6 +1012,31 @@ def main():
     )
 
     logger.info("Database update process completed.")
+
+    logger.info(f"reporting_ok: {reporting_ok}")
+    logger.error(f"reporting_failed: {reporting_failed}")
+    logger.info(f"reporting_ok_count: {len(reporting_ok)}")
+    logger.error(f"reporting_failed_count: {len(reporting_failed)}")
+    logger.info("="*80)
+
+    # Write reporting to file
+    with open('reporting.txt', 'w') as f:
+        f.write(f"reporting_ok: {reporting_ok}\n")
+        f.write(f"reporting_failed: {reporting_failed}\n")
+
+    print("="*80)
+    print("update complete")
+    print("-"*80)
+    print(f"reporting_ok: {reporting_ok}")
+    print(f"reporting_failed: {reporting_failed}")
+    ok = len(reporting_ok)
+    failed = len(reporting_failed)
+    print(f"ok: {ok}")
+    print(f"failed: {failed}")
+    print(f"success rate: {ok / (ok + failed)}")
+    print("="*80)
+
+
 
 if __name__ == "__main__":
     main()
