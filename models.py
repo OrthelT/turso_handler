@@ -159,14 +159,14 @@ class DoctrineFit(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     doctrine_name: Mapped[str] = mapped_column(String)
     fit_name: Mapped[str] = mapped_column(String)
-    fit_id: Mapped[int] = mapped_column(Integer)
-    doctrine_id: Mapped[int] = mapped_column(Integer)
-    target: Mapped[int] = mapped_column(Integer)
-    ship_type: Mapped[str] = mapped_column(String)
     ship_type_id: Mapped[int] = mapped_column(Integer)
-    ship_target: Mapped[int] = mapped_column(Integer)
+    doctrine_id: Mapped[int] = mapped_column(Integer)
+    fit_id: Mapped[int] = mapped_column(Integer)
+    ship_name: Mapped[str] = mapped_column(String)
+    target: Mapped[int] = mapped_column(Integer)
+    
     def __repr__(self):
-        return f"<DoctrineFit(doctrine_name='{self.doctrine_name}', fit_name='{self.fit_name}', ship_type='{self.ship_type}')>"
+        return f"<DoctrineFit(doctrine_name='{self.doctrine_name}', fit_name='{self.fit_name}', ship_name='{self.ship_name}')>"
 
 if __name__ == "__main__":
     pass

@@ -21,7 +21,7 @@ def setup_logging(log_name="turso_handler2", log_file="logs/turso_handler.log", 
     # Create and add stream handler
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-    stream_handler.setLevel(logging.ERROR)
+    stream_handler.setLevel(logging.INFO)
     logger.addHandler(stream_handler)
 
     logger.setLevel(level)

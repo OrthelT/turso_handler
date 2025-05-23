@@ -870,62 +870,27 @@ def update_doctrine_fits():
     try:
         df = preprocess_doctrine_fits()
 
-        # Ensure id column is unique and sequential
-        if 'id' in df.columns:
-            # Generate new sequential IDs to avoid conflicts
-            df['id'] = range(1, len(df) + 1)
-        else:
-            # Add an id column if it doesn't exist
-            df.insert(0, 'id', range(1, len(df) + 1))
-            
-        # Handle null columns
-        df = handle_null_columns(df, DoctrineFit)
-        
-        # Validate that we have data before proceeding
-        if df.empty:
-            logger.error("Doctrine fits dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in doctrine fits data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
-        
-        logger.info(f"Prepared {len(data)} doctrine fit records for insertion") 
     except Exception as e:
-        
-        start = datetime.now()
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        
-        # Only store record count, not full data
-        record_count = 0
-        with Session(engine) as session:
-            try:
-                result = session.execute(text("SELECT COUNT(*) FROM doctrine_fits")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing doctrine fit records")
-            except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-                
-        with Session(engine) as session:
-            # Clear existing data only after we've validated new data
-            logger.info(f"Clearing existing doctrine fit data") 
-            try:
-                session.execute(text("DELETE FROM doctrine_fits"))
-                session.commit()
-            except Exception as e:
-                logger.warning(f"Could not clear doctrine_fits table: {e}")
-                session.rollback()
-                
-            if data:
-                logger.info(f"Inserting {len(data)} doctrine fit records")
-                mapper = inspect(DoctrineFit)
-                session.bulk_insert_mappings(mapper, data)
-                session.commit()
-                
-            logger.info(f"Doctrine fit update completed")
-            
+        logger.error(f"Failed to update doctrine fits: {e}")
+        reporting_failed.append('doctrine_fits')
+        return False
+    
+    turso_url = f"sqlite+{fly_mkt_url}/?authToken={fly_mkt_token}&secure=true"
+    engine = create_engine(turso_url)
 
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS doctrine_fits"))
+            conn.execute(text("CREATE TABLE doctrine_fits (id INTEGER PRIMARY KEY AUTOINCREMENT, doctrine_name TEXT, fit_name TEXT, ship_type_id INTEGER, doctrine_id INTEGER, fit_id INTEGER, ship_name TEXT, target INTEGER)"))
+            conn.execute(text("INSERT INTO doctrine_fits (doctrine_name, fit_name, ship_type_id, doctrine_id, fit_id, ship_name, target) VALUES (:doctrine_name, :fit_name, :ship_type_id, :doctrine_id, :fit_id, :ship_name, :target)"), df.to_dict(orient='records'))
+            conn.commit()
+
+    except Exception as e:
+        logger.error(f"Failed to update doctrine fits: {e}")
+        reporting_failed.append('doctrine_fits')
+        return False
+
+    return True
 
 def check_tables():
     logger.info(f"checking tables")
@@ -1001,8 +966,12 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
 
 def main():
     logger.info(f"starting main")
-    logger.info(f"date: {datetime.now()}")
-    logger.info("="*100)
+    print(f"date: {datetime.now()}")
+    print("starting main")
+    print("="*100)
+    print("performing data integrity checks")
+ 
+    print("="*100)
     parser = argparse.ArgumentParser(description="options for market ESI calls")
 
     # Add arguments
@@ -1026,6 +995,7 @@ def main():
         return
 
     logger.info("starting db update...")
+    print("starting db update...")
     logger.info(f"date: {datetime.now()}\n\n")
     logger.info("="*100)
 
@@ -1089,9 +1059,12 @@ def main():
     logger.info("Database update process completed.")
 
     logger.info(f"reporting_ok: {reporting_ok}")
-    logger.error(f"reporting_failed: {reporting_failed}")
     logger.info(f"reporting_ok_count: {len(reporting_ok)}")
-    logger.error(f"reporting_failed_count: {len(reporting_failed)}")
+    if reporting_failed:
+        logger.error(f"reporting_failed: {reporting_failed}")
+        logger.error(f"reporting_failed_count: {len(reporting_failed)}")
+    else:
+        logger.info("all data updates reported success")
     logger.info("="*80)
 
     # Write reporting to file
@@ -1108,7 +1081,7 @@ def main():
     failed = len(reporting_failed)
     print(f"ok: {ok}")
     print(f"failed: {failed}")
-    print(f"success rate: {ok / (ok + failed)}")
+    print(f"success rate: {(ok / (ok + failed)):.2f}")
     print("="*80)
 
 if __name__ == "__main__":
