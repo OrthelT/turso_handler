@@ -16,9 +16,10 @@ import numpy as np
 
 from logging.handlers import RotatingFileHandler
 from logging_config import setup_logging
-from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets, DoctrineMap
+from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets, DoctrineMap, DoctrineFit
+from doctrine_data import preprocess_doctrine_fits
 
-logger = setup_logging()
+logger = setup_logging(__name__)
 
 path_begin = "/mnt/c/Users/User/PycharmProjects"
 
@@ -861,6 +862,71 @@ def update_doctrine_map():
         logger.error(f"Failed to update doctrine map: {e}")
         raise
 
+def update_doctrine_fits():
+    logger.info(f"updating doctrine fits")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+    
+    try:
+        df = preprocess_doctrine_fits()
+
+        # Ensure id column is unique and sequential
+        if 'id' in df.columns:
+            # Generate new sequential IDs to avoid conflicts
+            df['id'] = range(1, len(df) + 1)
+        else:
+            # Add an id column if it doesn't exist
+            df.insert(0, 'id', range(1, len(df) + 1))
+            
+        # Handle null columns
+        df = handle_null_columns(df, DoctrineFit)
+        
+        # Validate that we have data before proceeding
+        if df.empty:
+            logger.error("Doctrine fits dataframe is empty. Aborting update to prevent data loss.")
+            raise ValueError("Empty dataframe - aborting to prevent data loss")
+        
+        data = df.to_dict(orient='records')
+        if not data:
+            logger.error("No records found in doctrine fits data. Aborting update to prevent data loss.")
+            raise ValueError("No records in data - aborting to prevent data loss")
+        
+        logger.info(f"Prepared {len(data)} doctrine fit records for insertion") 
+    except Exception as e:
+        
+        start = datetime.now()
+        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
+        
+        # Only store record count, not full data
+        record_count = 0
+        with Session(engine) as session:
+            try:
+                result = session.execute(text("SELECT COUNT(*) FROM doctrine_fits")).scalar()
+                record_count = result or 0
+                logger.info(f"Found {record_count} existing doctrine fit records")
+            except Exception as e:
+                logger.warning(f"Could not count existing records: {e}")
+                
+        with Session(engine) as session:
+            # Clear existing data only after we've validated new data
+            logger.info(f"Clearing existing doctrine fit data") 
+            try:
+                session.execute(text("DELETE FROM doctrine_fits"))
+                session.commit()
+            except Exception as e:
+                logger.warning(f"Could not clear doctrine_fits table: {e}")
+                session.rollback()
+                
+            if data:
+                logger.info(f"Inserting {len(data)} doctrine fit records")
+                mapper = inspect(DoctrineFit)
+                session.bulk_insert_mappings(mapper, data)
+                session.commit()
+                
+            logger.info(f"Doctrine fit update completed")
+            
+
+
 def check_tables():
     logger.info(f"checking tables")
     logger.info(f"date: {datetime.now()}")
@@ -1012,6 +1078,14 @@ def main():
         'doctrine_map'
     )
 
+    # Update doctrine fits
+    safe_update_operation(
+        update_doctrine_fits,
+        'updating table: doctrine fits',
+        table_dict,
+        'doctrine_fits'
+    )
+    
     logger.info("Database update process completed.")
 
     logger.info(f"reporting_ok: {reporting_ok}")
@@ -1036,8 +1110,6 @@ def main():
     print(f"failed: {failed}")
     print(f"success rate: {ok / (ok + failed)}")
     print("="*80)
-
-
 
 if __name__ == "__main__":
     main()
