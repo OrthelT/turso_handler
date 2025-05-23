@@ -10,3 +10,5 @@ brazil/
 *.db-shm
 *.db-wal
 utils/
+reporting.txt
+

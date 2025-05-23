@@ -915,6 +915,7 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
         retry_operation(operation_func)
         logger.info(f'{description} completed successfully.')
         reporting_ok.append(table_name)
+        print(f'{description} completed successfully.')
         return True
     except Exception as e:
         logger.error(f'Error in {description}: {e}')
