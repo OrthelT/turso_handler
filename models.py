@@ -164,9 +164,19 @@ class DoctrineFit(Base):
     fit_id: Mapped[int] = mapped_column(Integer)
     ship_name: Mapped[str] = mapped_column(String)
     target: Mapped[int] = mapped_column(Integer)
-    
+
     def __repr__(self):
         return f"<DoctrineFit(doctrine_name='{self.doctrine_name}', fit_name='{self.fit_name}', ship_name='{self.ship_name}')>"
+
+class LeadShips(Base):
+    __tablename__ = 'lead_ships'
+    doctrine_name: Mapped[str] = mapped_column(String)
+    doctrine_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_ship: Mapped[int] = mapped_column(Integer)
+    fit_id: Mapped[int] = mapped_column(Integer)
+    
+    def __repr__(self):
+        return f"<LeadShips(doctrine_name='{self.doctrine_name}', doctrine_id='{self.doctrine_id}', lead_ship='{self.lead_ship}', fit_id='{self.fit_id}')>"
 
 if __name__ == "__main__":
     pass

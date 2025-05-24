@@ -30,6 +30,7 @@ watchlist = f"{path_begin}/eveESO/output/brazil/watchlist.csv"
 new_orderscsv = f"{path_begin}/eveESO/output/brazil/new_orders.csv"
 new_doctrines = f"{path_begin}/eveESO/output/brazil/new_doctrines.csv"
 doctrine_map = f"{path_begin}/eveESO/output/brazil/doctrine_map.csv"
+lead_ships = f"{path_begin}/eveESO/output/brazil/lead_ships.csv"
 
 ship_targets = f"{path_begin}/eveESO/data/ship_targets2.csv"
 path = f"{path_begin}/eveESO/output/brazil/"
@@ -57,7 +58,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
 # Updated chunk size to avoid message size limit errors
-CHUNK_SIZE = 500  # increased from 100 to 500 to improve performance
+CHUNK_SIZE = 1000  # increased from 100 to 500 to improve performance
 reporting_ok = []
 reporting_failed = []
 
@@ -275,7 +276,6 @@ def get_type_names(df):
     logger.info("="*100)
 
     return named_df
-
 
 def fetch_from_brazil(selected_items: list):
     engine = create_engine(mkt_url, echo=False)
@@ -892,6 +892,26 @@ def update_doctrine_fits():
 
     return True
 
+def update_lead_ships():
+    logger.info(f"updating lead ships")
+    logger.info(f"date: {datetime.now()}")
+    logger.info("="*100)
+    
+    try:
+        df = pd.read_csv(lead_ships)
+        engine = create_engine(mkt_url)
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS lead_ships"))
+            conn.execute(text("CREATE TABLE lead_ships (id INTEGER PRIMARY KEY AUTOINCREMENT, doctrine_name TEXT, doctrine_id INTEGER, lead_ship INTEGER, fit_id INTEGER)"))
+            conn.execute(text("INSERT INTO lead_ships (doctrine_name, doctrine_id, lead_ship, fit_id) VALUES (:doctrine_name, :doctrine_id, :lead_ship, :fit_id)"), df.to_dict(orient='records'))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to update lead ships: {e}")
+        reporting_failed.append('lead_ships')
+        return False
+
+    return True
+
 def check_tables():
     logger.info(f"checking tables")
     logger.info(f"date: {datetime.now()}")
@@ -979,6 +999,14 @@ def main():
                         action="store_true",
                         help="--hist to refresh history data"
                         )
+    parser.add_argument("--update_fits",
+                        action="store_true",
+                        help="--update_fits to refresh doctrine fits data"
+                        )
+    parser.add_argument("--update_lead_ships",
+                        action="store_true",
+                        help="--update_lead_ships to refresh lead ships data"
+                        )
 
     args = parser.parse_args()
     table_dict = check_tables()
@@ -1041,21 +1069,33 @@ def main():
     )
 
     # Update doctrine map
-    safe_update_operation(
-        update_doctrine_map,
-        'updating table: doctrine map',
-        table_dict,
-        'doctrine_map'
-    )
+    if args.update_fits:
+        safe_update_operation(
+            update_doctrine_map,
+            'updating table: doctrine map',
+            table_dict,
+            'doctrine_map'
+        )
 
     # Update doctrine fits
-    safe_update_operation(
-        update_doctrine_fits,
-        'updating table: doctrine fits',
-        table_dict,
-        'doctrine_fits'
-    )
+    if args.update_fits:
+        safe_update_operation(
+            update_doctrine_fits,
+            'updating table: doctrine fits',
+            table_dict,
+            'doctrine_fits'
+        )
     
+    # Update lead ships
+    if args.update_lead_ships:
+        safe_update_operation(
+            update_lead_ships,
+            'updating table: lead ships',
+            table_dict,
+            'lead_ships'
+        )
+    
+
     logger.info("Database update process completed.")
 
     logger.info(f"reporting_ok: {reporting_ok}")
