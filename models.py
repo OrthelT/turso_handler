@@ -1,5 +1,5 @@
 import pandas as pd
-from sqlalchemy import String, Integer, DateTime, Float, Boolean, create_engine, text
+from sqlalchemy import MetaData, String, Integer, DateTime, Float, Boolean, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, Mapped, mapped_column
 import libsql_experimental as libsql
 

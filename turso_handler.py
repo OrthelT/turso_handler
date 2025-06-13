@@ -5,18 +5,14 @@ import os
 import shutil
 import time as time_module  # Rename to avoid conflict with datetime.time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, select, text, inspect, Table
-from sqlalchemy.orm import Session, base, DeclarativeBase, sessionmaker
-import sqlalchemy_libsql
-import sqlalchemy.dialects.sqlite
-from datetime import timedelta, time, datetime
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.orm import Session
+from datetime import datetime
 import argparse
-import sqlite3
 import numpy as np
 
-from logging.handlers import RotatingFileHandler
 from logging_config import setup_logging
-from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets, DoctrineMap, DoctrineFit
+from models import MarketStats, MarketOrders, Base, MarketHistory, Doctrines, ShipTargets, DoctrineMap
 from doctrine_data import preprocess_doctrine_fits
 
 logger = setup_logging(__name__)
@@ -58,9 +54,18 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
 # Updated chunk size to avoid message size limit errors
-CHUNK_SIZE = 1000  # increased from 100 to 500 to improve performance
+CHUNK_SIZE = 2000  # increased to 2000 to improve performance
 reporting_ok = []
 reporting_failed = []
+
+restore_map = {'doctrine_fits': 'doctrine_fits', 
+                   'doctrine_map': 'doctrine_map', 
+                   'lead_ships': 'lead_ships', 
+                   'new_doctrines': 'doctrines', 
+                   'new_history': 'market_history', 
+                   'new_orders': 'marketorders', 
+                   'new_stats': 'marketstats', 
+                   'ship_targets': 'ship_targets'}
 
 def handle_null_columns(df, model_class):
     """
@@ -172,33 +177,51 @@ def backup_database():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_filename = f"{backup_dir}/wcmkt_backup_{timestamp}.db"
     
+    # First, we will sync the remote database to the local database using libsql
     try:
-        # For local SQLite database
-        if os.path.exists(fly_mkt_local):
-            shutil.copy2(fly_mkt_local, backup_filename)
-            logger.info(f"Local database backed up to {backup_filename}")
-            return backup_filename
-        
-        # For remote Turso database - download a snapshot first
-        engine = create_engine(mkt_url, echo=False)
-        with engine.connect() as conn:
-            # Get all tables and their data
-            tables = {}
-            for table_name in inspect(engine).get_table_names():
-                result = conn.execute(text(f"SELECT * FROM {table_name}"))
-                data = [dict(row) for row in result]
-                tables[table_name] = data
-            
-            # Save the data to a JSON file as backup
-            json_backup = f"{backup_dir}/wcmkt_backup_{timestamp}.json"
-            with open(json_backup, 'w') as f:
-                json.dump(tables, f)
-            
-            logger.info(f"Remote database backed up to {json_backup}")
-            return json_backup
+        conn = libsql.connect(fly_mkt_local, sync_url=fly_mkt_url, auth_token=fly_mkt_token)
+        conn.sync()
     except Exception as e:
-        logger.error(f"Failed to create database backup: {e}")
+        logger.error(f"Failed to sync database: {e}")
+
+    # Then, we will copy the local database to the backup directory
+    shutil.copy2(fly_mkt_local, backup_filename)
+    logger.info(f"Database backed up to {backup_filename}")
+    return backup_filename
+
+def remove_old_db():
+    """Remove old database backups."""
+    db_path = "/mnt/c/Users/User/PycharmProjects/eveESO/backup/"
+    db_dict = {}
+    db_list = [file for file in os.listdir(db_path) if file.endswith(".db")]
+    removed_dbs = []
+    if len(db_list) > 3:
+        logger.info(f"found {len(db_list)} db files, removing old ones")
+
+        for file in db_list:
+            ctime = os.path.getctime(os.path.join(db_path, file))
+            db_dict[file] = ctime
+
+        sorted_db_dict = sorted(db_dict.items(), key=lambda x: x[1], reverse=True)
+        old_db = sorted_db_dict[2:]
+        for file, ctime in old_db:
+            db = os.path.join(db_path, file)
+            os.remove(db)
+            logger.info(f"removed {file}")
+            removed_dbs.append(file)
+        logger.info(f"found {len(removed_dbs)} old db files, removed {removed_dbs}")
+        return removed_dbs
+
+    else:
+        logger.info(f"found {len(db_list)} db files, no need to remove")
         return None
+
+def get_most_recent_backup(backup_dir):
+    """Get the most recent backup file."""
+    db_path = backup_dir
+    db_list = [file for file in os.listdir(db_path) if file.endswith(".db")]
+    db_list.sort(key=lambda x: os.path.getctime(os.path.join(db_path, x)), reverse=True)
+    return os.path.join(db_path, db_list[0])
 
 def restore_database(backup_file):
     """Restore the database from a backup."""
@@ -247,6 +270,15 @@ def restore_database(backup_file):
         logger.error(f"Failed to restore database: {e}")
         return False
 
+def get_backup_table(table_name)->pd.DataFrame:
+    table = table_name
+    most_recent_backup = get_most_recent_backup(backup_dir)
+    engine = create_engine(f"sqlite:///{most_recent_backup}")
+    with engine.connect() as conn:
+        df = pd.read_sql_table(table, conn)
+        return df
+
+
 def get_type_names(df):
     logger.info(f"getting type names for {len(df)} rows")
     logger.info(f"date: {datetime.now()}")
@@ -283,7 +315,7 @@ def fetch_from_brazil(selected_items: list):
     items_str = ','.join(str(i) for i in items)
     params = {'items': items_str}
     # noinspection SqlDialectInspection
-    stmt = text(f"""
+    stmt = text("""
             SELECT * FROM marketstats 
             WHERE type_id IN (:items)
         """)
@@ -308,7 +340,7 @@ def fetch_from_brazil(selected_items: list):
     return df
 
 def update_history():
-    logger.info(f"updating history")
+    logger.info("updating history")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -356,7 +388,7 @@ def update_history():
         with Session(engine) as session:
             try:
                 # Only delete if we have new data
-                logger.info(f"Clearing existing history data")
+                logger.info("Clearing existing history data")
                 try:
                     session.execute(text("DELETE FROM market_history"))
                     session.commit()
@@ -375,7 +407,7 @@ def update_history():
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
                         
-                logger.info(f"History update completed")
+                logger.info("History update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -384,8 +416,7 @@ def update_history():
                 
                 # Log that we can't restore because we didn't keep the full backup
                 if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} history records - they were not backed up in memory")
-                
+                    logger.error(f"Cannot rollback {record_count} history records - they were not backed up in memory")
                 raise
         
         finish = datetime.now()
@@ -398,10 +429,10 @@ def update_history():
         raise
 
 def update_orders():
-    logger.info(f"updating orders")
+    logger.info("updating orders")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
-    
+
     try:
         df = pd.read_csv(new_orderscsv)
         df.issued = pd.to_datetime(df.issued)
@@ -455,7 +486,7 @@ def update_orders():
         with Session(engine) as session:
             try:
                 # First clear the existing data - more efficient for large updates
-                logger.info(f"Clearing existing orders data")
+                logger.info("Clearing existing orders data")
                 try:
                     session.execute(text("DELETE FROM marketorders"))
                     session.commit()
@@ -474,7 +505,7 @@ def update_orders():
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
                         
-                logger.info(f"Orders update completed")
+                logger.info("Orders update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -483,8 +514,8 @@ def update_orders():
                 
                 # Log that we can't restore because we didn't keep the full backup
                 if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} order records - they were not backed up in memory")
-                
+                    logger.error(f"Cannot rollback {record_count} order records - they were not backed up in memory")
+                    logger.info("restoring from backup instead")
                 raise
     
         finish = datetime.now()
@@ -497,7 +528,7 @@ def update_orders():
         raise
 
 def update_stats():
-    logger.info(f"updating stats")
+    logger.info("updating stats")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -549,7 +580,7 @@ def update_stats():
         with Session(engine) as session:
             try:
                 # Clear existing data
-                logger.info(f"Clearing existing stats data")
+                logger.info("Clearing existing stats data")
                 try:
                     session.execute(text("DELETE FROM marketstats"))
                     session.commit()
@@ -568,7 +599,7 @@ def update_stats():
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
                         
-                logger.info(f"Stats update completed")
+                logger.info("Stats update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -642,7 +673,7 @@ def update_doctrines():
         with Session(engine) as session:
             try:
                 # Clear existing data
-                logger.info(f"Clearing existing doctrines data")
+                logger.info("Clearing existing doctrines data")
                 try:
                     session.execute(text("DELETE FROM doctrines"))
                     session.commit()
@@ -661,7 +692,7 @@ def update_doctrines():
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
                         
-                logger.info(f"Doctrines update completed")
+                logger.info("Doctrines update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -687,7 +718,7 @@ def update_doctrines():
         raise
 
 def update_ship_targets():
-    logger.info(f"updating ship targets")
+    logger.info("updating ship targets")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -735,7 +766,7 @@ def update_ship_targets():
         with Session(engine) as session:
             try:
                 # Clear existing data only after we've validated new data
-                logger.info(f"Clearing existing ship targets data")
+                logger.info("Clearing existing ship targets data")
                 try:
                     session.execute(text("DELETE FROM ship_targets"))
                     session.commit()
@@ -754,7 +785,7 @@ def update_ship_targets():
                         session.bulk_insert_mappings(mapper, chunk)
                         session.commit()
                         
-                logger.info(f"Ship targets update completed")
+                logger.info("Ship targets update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -777,7 +808,7 @@ def update_ship_targets():
         raise
 
 def update_doctrine_map():
-    logger.info(f"updating doctrine map")
+    logger.info("updating doctrine map")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -823,7 +854,7 @@ def update_doctrine_map():
         with Session(engine) as session:
             try:
                 # Clear existing data only after we've validated new data
-                logger.info(f"Clearing existing doctrine map data")
+                logger.info("Clearing existing doctrine map data")
                 try:
                     session.execute(text("DELETE FROM doctrine_map"))
                     session.commit()
@@ -840,7 +871,7 @@ def update_doctrine_map():
                     session.bulk_insert_mappings(mapper, data)
                     session.commit()
                         
-                logger.info(f"Doctrine map update completed")
+                logger.info("Doctrine map update completed")
             except Exception as e:
                 session.rollback()
                 logger.info("*"*100)
@@ -863,7 +894,7 @@ def update_doctrine_map():
         raise
 
 def update_doctrine_fits():
-    logger.info(f"updating doctrine fits")
+    logger.info("updating doctrine fits")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -893,7 +924,7 @@ def update_doctrine_fits():
     return True
 
 def update_lead_ships():
-    logger.info(f"updating lead ships")
+    logger.info("updating lead ships")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
@@ -913,7 +944,7 @@ def update_lead_ships():
     return True
 
 def check_tables():
-    logger.info(f"checking tables")
+    logger.info("checking tables")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
 
@@ -952,15 +983,6 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
         reporting_failed.append(table_name)
         return False
     
-    # Create backup before performing the operation
-    try:
-        backup_file = backup_database()
-        if not backup_file:
-            logger.warning("Failed to create database backup. Proceeding without backup.")
-    except Exception as e:
-        logger.error(f"Error creating database backup: {e}")
-        backup_file = None
-    
     try:
         # Try to perform the operation with retries
         retry_operation(operation_func)
@@ -971,23 +993,33 @@ def safe_update_operation(operation_func, description, table_dict, table_name, m
     except Exception as e:
         logger.error(f'Error in {description}: {e}')
         reporting_failed.append(table_name)
-        if backup_file:
-            try:
-                logger.info(f'Attempting to restore database from backup: {backup_file}')
-                if restore_database(backup_file):
-                    logger.info(f'Database successfully restored from backup.')
-                else:
-                    logger.error(f'Failed to restore database from backup!')
-            except Exception as restore_error:
-                logger.error(f"Error during database restore: {restore_error}")
-        else:
-            logger.error(f'No backup available for restore!')
         return False
 
+def restore_tables(table, db_url, backup_dir, table_map):
+    restored_table = table_map[table]
+    logger.info(f"restoring {table} to {db_url} as {restored_table}")
+
+    backup_db = get_most_recent_backup(backup_dir)
+    backup_engine = create_engine(f"sqlite:///{backup_db}")
+    with backup_engine.connect() as conn:
+        df = pd.read_sql_table(restored_table, conn)
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        try:
+            df.to_sql(restored_table, conn, if_exists='replace', index=False)
+            logger.info(f"table: {restored_table} restored successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error restoring {restored_table}: {e}")
+            return False
+
+
+
+
 def main():
-    logger.info(f"starting main")
+    logger.info("starting db update main function")
     print(f"date: {datetime.now()}")
-    print("starting main")
+    print("starting db update main function")
     print("="*100)
     print("performing data integrity checks")
  
@@ -1012,7 +1044,19 @@ def main():
     table_dict = check_tables()
 
     logger.info(f"connecting to database: {mkt_url}")
+    print(f"connecting to database: {mkt_url}")
+    print("backing up database")
+    db_file = backup_database()
+    logger.info(f"database backed up to: {db_file}")
+    print(f"database backed up to: {db_file}")
+    logger.info("removing old db files")
+    print("removing old db files")
+    removed_dbs = remove_old_db()
+    logger.info(f"removed {removed_dbs} old db files")
+    print(f"removed {removed_dbs} old db files")
     
+    print("="*100)
+
     # Make sure tables exist
     try:
         engine = create_engine(mkt_url, echo=False)
@@ -1107,10 +1151,12 @@ def main():
         logger.info("all data updates reported success")
     logger.info("="*80)
 
+    reporting_dict = {'reporting_ok': reporting_ok, 'reporting_failed': reporting_failed}
+    logger.info(f"reporting_dict: {reporting_dict}")
+
     # Write reporting to file
-    with open('reporting.txt', 'w') as f:
-        f.write(f"reporting_ok: {reporting_ok}\n")
-        f.write(f"reporting_failed: {reporting_failed}\n")
+    with open('reporting.json', 'w') as f:
+        json.dump(reporting_dict, f)
 
     print("="*80)
     print("update complete")
@@ -1123,6 +1169,15 @@ def main():
     print(f"failed: {failed}")
     print(f"success rate: {(ok / (ok + failed)):.2f}")
     print("="*80)
+
+    if failed > 0:
+        print("failed to restore some tables, attempting to restore from backup")
+        for table in reporting_failed:
+            status = restore_tables(table = table, db_url = mkt_url, backup_dir = backup_dir, table_map = restore_map)
+            if status:
+                print(f"table: {table} restored successfully")
+            else:
+                print(f"table: {table} restoration failed")
 
 if __name__ == "__main__":
     main()
