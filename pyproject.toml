@@ -1,0 +1,16 @@
+[project]
+name = "turso-update"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "argparse>=1.4.0",
+    "datetime>=5.5",
+    "libsql>=0.1.2",
+    "pandas>=2.3.0",
+    "python-dotenv>=1.1.0",
+    "sqlalchemy>=2.0.41",
+    "sqlalchemy-libsql>=0.2.0",
+    "sqlalchemy-orm>=1.2.10",
+]
