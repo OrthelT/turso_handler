@@ -1119,4 +1119,4 @@ def main():
                 print(f"table: {table} restoration failed")
 
 if __name__ == "__main__":
-    main()
+    pass
