@@ -3,7 +3,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy import create_engine, text
 from logging_config import setup_logging
-from models import DoctrineFit
+from models import DoctrineFits
 
 
 setup_logging(log_name='doctrine_data')
