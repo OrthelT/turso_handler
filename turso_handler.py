@@ -1,9 +1,10 @@
 import json
+import libsql
 import pandas as pd
 import os
 import shutil
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, insert, text, inspect
+from sqlalchemy import create_engine, insert, select, text, inspect
 from sqlalchemy.orm import Session
 from datetime import datetime
 import argparse
@@ -180,7 +181,7 @@ def backup_database():
 
 def remove_old_db():
     """Remove old database backups."""
-    db_path = "/mnt/c/Users/User/PycharmProjects/eveESO/backup/"
+    db_path = backup_dir  # Changed from hardcoded path to use the backup_dir variable
     db_dict = {}
     db_list = [file for file in os.listdir(db_path) if file.endswith(".db")]
     removed_dbs = []
@@ -224,7 +225,7 @@ def restore_database(table):
     data = clean_data(df, failed_class)
     print(data)
     
-    engine = create_engine("sqlite+libsql:///mock.db")
+    engine = get_wcmkt_remote_engine()
     Base.metadata.create_all(engine)
     session = Session(engine)
     bulk_insert_in_chunks(session, failed_class, data)
@@ -357,7 +358,7 @@ def check_tables():
     for table in tables:
         logger.info("="*100)
         if table.endswith(".csv"):
-            df = pd.read_csv(datadir + table)
+            df = pd.read_csv(os.path.join(datadir, table))
             table_name = table.split(".")[0]
             table_dict[table_name] = len(df)
             logger.info(f"{table_name}: {len(df)}")
@@ -556,8 +557,6 @@ def bulk_insert_in_chunks(session: Session, table, data, chunk_size=1000, disabl
     :param table_name: name of the table for error reporting and restoration
     :return: True if successful, False if failed
     """
-    if disable_sync:
-        session.execute(text("PRAGMA synchronous = OFF"))
 
     try:
         with session.begin():
@@ -658,9 +657,3 @@ def prepare_data_for_insertion(df, model_class):
 
 if __name__ == "__main__":
     main()
-
-
-
-
- 
-    

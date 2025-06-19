@@ -9,9 +9,9 @@ from models import DoctrineFits
 setup_logging(log_name='doctrine_data')
 
 mkt_db = "sqlite:///wcmkt.db"
-doctrine_data = "/mnt/c/Users/User/PycharmProjects/eveESO/output/brazil/doctrine_fits.csv"
-ship_targets = "/mnt/c/Users/User/PycharmProjects/eveESO/data/ship_targets2.csv"
-lead_ships = "/mnt/c/Users/User/PycharmProjects/eveESO/output/brazil/lead_ships.csv"
+doctrine_data = "data/doctrine_fits.csv"
+ship_targets = "data/ship_targets2.csv"
+lead_ships = "data/lead_ships.csv"
 
 def construct_doctrine_data():
     df = pd.read_csv(doctrine_data)

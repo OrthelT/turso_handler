@@ -17,3 +17,6 @@ data/
 backup/
 mock.db
 wcmkt*
+mock.db*
+parse files
+temp/
