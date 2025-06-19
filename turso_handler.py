@@ -18,16 +18,16 @@ from models import MarketStats, MarketOrders, MarketHistory, Doctrines, Doctrine
 logger = setup_logging(__name__)
 
 datadir = "data"
+update_dir = "data/latest"
 
-new_orders = os.path.join(datadir, "new_orders.csv")
-new_history = os.path.join(datadir, "new_history.csv")
-new_stats = os.path.join(datadir, "new_stats.csv")
-watchlist = os.path.join(datadir, "watchlist.csv")
-new_orderscsv = os.path.join(datadir, "new_orders.csv")
-new_doctrines = os.path.join(datadir, "new_doctrines.csv")
-doctrine_map = os.path.join(datadir, "doctrine_map.csv")
-lead_ships = os.path.join(datadir, "lead_ships.csv")
-
+new_orders = os.path.join(update_dir, "new_orders.csv")
+new_history = os.path.join(update_dir, "new_history.csv")
+new_stats = os.path.join(update_dir, "new_stats.csv")
+watchlist = os.path.join(update_dir, "watchlist.csv")
+new_orderscsv = os.path.join(update_dir, "new_orders.csv")
+new_doctrines = os.path.join(update_dir, "new_doctrines.csv")
+doctrine_map = os.path.join(update_dir, "doctrine_map.csv")
+lead_ships = os.path.join(update_dir, "lead_ships.csv")
 ship_targets = os.path.join(datadir, "ship_targets2.csv")
 
 # Backup directory
@@ -353,12 +353,12 @@ def check_tables():
 
     table_dict = {}
 
-    tables = os.listdir(datadir)
+    tables = os.listdir(update_dir)
 
     for table in tables:
         logger.info("="*100)
         if table.endswith(".csv"):
-            df = pd.read_csv(os.path.join(datadir, table))
+            df = pd.read_csv(os.path.join(update_dir, table))
             table_name = table.split(".")[0]
             table_dict[table_name] = len(df)
             logger.info(f"{table_name}: {len(df)}")
