@@ -278,67 +278,6 @@ def get_backup_table(table_name)->pd.DataFrame:
         df = pd.read_sql_table(table, conn)
         return df
 
-
-def get_type_names(df):
-    logger.info(f"getting type names for {len(df)} rows")
-    logger.info(f"date: {datetime.now()}")
-    logger.info(f"df: {df.head()}")
-    logger.info(f"df columns: {df.columns}")
-    logger.info("="*100)
-    df.issued = pd.to_datetime(df.issued)
-    df.drop(columns='type_name', inplace=True)
-    type_ids = df.type_id.unique()
-    typestr = ','.join(str(i) for i in type_ids)
-
-    query = f"SELECT typeID, typeName FROM invTypes WHERE typeID IN ({typestr})"
-    logger.info(f"query: {query}")
-    try:
-        engine = create_engine(sde_url, echo=True)
-        with engine.connect() as conn:
-            df2 = pd.read_sql_query(query, conn)
-            df2.reset_index(drop=True, inplace=True)
-            rn_map = {'typeID':'type_id', 'typeName':'type_name'}
-            df2.rename(columns=rn_map, inplace=True)
-            named_df = pd.merge(df, df2, on='type_id', how='left')
-    except Exception as e:
-        logger.info("*"*100)
-        logger.error(f"error in get_type_names: {e}")
-    
-        logger.info("*"*100)
-    logger.info("="*100)
-
-    return named_df
-
-def fetch_from_brazil(selected_items: list):
-    engine = create_engine(mkt_url, echo=False)
-    items = selected_items
-    items_str = ','.join(str(i) for i in items)
-    params = {'items': items_str}
-    # noinspection SqlDialectInspection
-    stmt = text("""
-            SELECT * FROM marketstats 
-            WHERE type_id IN (:items)
-        """)
-
-    with Session(engine) as session:
-        result = session.query(MarketStats).filter(MarketStats.type_id.in_(items)).all()
-
-    result_dict = [row.__dict__ for row in result]
-
-    # noinspection PyTypeChecker
-    df = pd.DataFrame(result_dict, columns=result_dict[0].keys())
-    df.drop(columns=['_sa_instance_state'], inplace=True)
-    old_cols = ['avg_price', 'group_id', 'group_name', 'category_name', 'last_update',
-       'min_price', 'price', 'type_id', 'total_volume_remain', 'avg_volume',
-       'type_name', 'category_id', 'days_remaining']
-    new_cols = ['type_id', 'type_name', 'price', 'total_volume_remain', 'days_remaining','avg_volume','avg_price', 'group_name', 'category_name', 'group_id', 
-        'category_id', 'last_update']
-    
-    rename_map = dict(zip(old_cols, new_cols))
-    df.rename(columns=rename_map, inplace=True)
-
-    return df
-
 def update_history():
     logger.info("updating history")
     logger.info(f"date: {datetime.now()}")

@@ -8,7 +8,6 @@ awsenv.txt
 brazil/
 *.csv
 *.db-shm
-*.db-wal
 utils/
 reporting.txt
-
+legacy_code.py
