@@ -5,7 +5,7 @@ import os
 import shutil
 import time as time_module  # Rename to avoid conflict with datetime.time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, insert, text, inspect
 from sqlalchemy.orm import Session
 from datetime import datetime
 import argparse
@@ -1118,5 +1118,53 @@ def main():
             else:
                 print(f"table: {table} restoration failed")
 
+
+
+def clean_data(df: pd.DataFrame) -> list[dict]:
+        
+    df.issued = pd.to_datetime(df.issued)
+
+    # Replace inf and NaN values with None/NULL
+    df = df.replace([np.inf, -np.inf], None)
+    df = df.replace(np.nan, None)
+
+    df.infer_objects()
+
+    # Check if we need to add an ID column
+    if 'id' in df.columns:
+        # Generate new sequential IDs to avoid conflicts
+        df['id'] = range(1, len(df) + 1)
+    elif 'order_id' not in df.columns:
+        # Only add an id if there's no order_id (which might be the primary key)
+        df.insert(0, 'id', range(1, len(df) + 1))
+   # Get only the columns that exist in the MarketOrders model
+    valid_columns = [column.key for column in inspect(MarketOrders).columns]
+    df = df[df.columns.intersection(valid_columns)]
+
+    data = df.to_dict(orient='records')
+    return data
+
+def bulk_insert_in_chunks(session: Session, table, data, chunk_size=1000, disable_sync=False):
+    """
+    Insert `data` (a list of dicts) into `table` in chunks, using a single transaction.
+
+    :param session: an active SQLAlchemy Session
+    :param table: SQLAlchemy table object (e.g., MarketOrders)
+    :param data: list of dictionaries
+    :param chunk_size: number of rows per chunk
+    :param disable_sync: if True, set PRAGMA synchronous = OFF (SQLite only)
+    """
+    if disable_sync:
+        session.execute(text("PRAGMA synchronous = OFF"))
+
+    with session.begin():
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
+            logger.info(f"inserting chunk {i//chunk_size + 1} of {len(data)//chunk_size + 1}")
+            stmt = insert(table).values(chunk)
+            session.execute(stmt)
+            logger.info("--------------------------------")
+
 if __name__ == "__main__":
-    pass
+    table_dict = check_tables()
+    print(table_dict)
