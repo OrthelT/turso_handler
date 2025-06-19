@@ -13,3 +13,10 @@ reporting.txt
 legacy_code.py
 sde.db
 sde_master.db
+data/
+backup/
+mock.db
+wcmkt*
+mock.db*
+parse files
+temp/

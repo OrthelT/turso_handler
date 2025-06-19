@@ -3,7 +3,6 @@ from sqlalchemy import MetaData, String, Integer, DateTime, Float, Boolean, crea
 from sqlalchemy.orm import DeclarativeBase, Session, Mapped, mapped_column
 import libsql_experimental as libsql
 
-
 class Base(DeclarativeBase):
     pass
 
@@ -153,7 +152,7 @@ class DoctrineMap(Base):
         doctrine_id={self.doctrine_id!r},
         fitting_id={self.fitting_id!r}
         )"""
-class DoctrineFit(Base):
+class DoctrineFits(Base):
     __tablename__ = 'doctrine_fits'
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -177,6 +176,8 @@ class LeadShips(Base):
     
     def __repr__(self):
         return f"<LeadShips(doctrine_name='{self.doctrine_name}', doctrine_id='{self.doctrine_id}', lead_ship='{self.lead_ship}', fit_id='{self.fit_id}')>"
+
+
 
 if __name__ == "__main__":
     pass
