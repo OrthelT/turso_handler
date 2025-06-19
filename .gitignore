@@ -11,3 +11,5 @@ brazil/
 utils/
 reporting.txt
 legacy_code.py
+sde.db
+sde_master.db
