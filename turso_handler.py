@@ -212,50 +212,28 @@ def get_most_recent_backup(backup_dir):
     db_list.sort(key=lambda x: os.path.getctime(os.path.join(db_path, x)), reverse=True)
     return os.path.join(db_path, db_list[0])
 
-# def restore_database(table):
-#     """Restore the database from a backup."""
-#     backup_file = get_most_recent_backup(backup_dir)
-#     if not backup_file or not os.path.exists(backup_file):
-#         logger.error(f"Backup file not found: {backup_file}")
-#         raise Exception("Backup file not found")
-    
-#     restore_class = restore_class_map[table]
-#     table_name = table
+def restore_database(table):
+    failed_class = restore_class_map[table]
+    failed_table = restore_map[table]
 
-#     engine = create_engine(f"sqlite+libsql:///{backup_file}")
-#     session = Session(engine)
-
-            
-#     with session.begin():
-#         session.execute(text(f"DROP TABLE IF EXISTS {table}"))
-#         Base.metadata.create_all(engine)
-            
-#             # Recreate tables
-#         Base.metadata.create_all(engine)
-        
-#         # Insert data
-#         for table_name, data in tables.items():
-#             if data:
-#                 session = Session(engine)
-#                 bulk_insert_in_chunks(session, table_name, data)
+    backup_file = get_most_recent_backup(backup_dir)
     
-#     logger.info(f"Database restored from {backup_file}")
-# else:
-#     logger.error(f"Unknown backup file format: {backup_file}")
-#     return False
+    engine = create_engine(f"sqlite+libsql:///{backup_file}")
+    with engine.connect() as conn:
+        df = pd.read_sql_table(failed_class.__tablename__, conn)
+    conn.close()
+    engine.dispose()
+    data = clean_data(df, failed_class)
+    print(data)
     
-#     return True
-# except Exception as e:
-#     logger.error(f"Failed to restore database: {e}")
-#     return False
-
-# def get_backup_table(table_name)->pd.DataFrame:
-#     table = table_name
-#     most_recent_backup = get_most_recent_backup(backup_dir)
-#     engine = create_engine(f"sqlite:///{most_recent_backup}")
-#     with engine.connect() as conn:
-#         df = pd.read_sql_table(table, conn)
-#         return df
+    engine = create_engine("sqlite+libsql:///mock.db")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    bulk_insert_in_chunks(session, failed_class, data)
+    session.commit()
+    session.close()
+    engine.dispose()
+    logger.info(f"restored {table} from backup")
 
 def update_history():
     logger.info("updating history")
@@ -284,7 +262,14 @@ def update_history():
         session.commit()
             
         logger.info(f"Inserting {len(data)} history records")
-        bulk_insert_in_chunks(session, 'market_history', data)
+        try:
+            bulk_insert_in_chunks(session, 'market_history', data)
+            reporting_ok.append('new_history')
+        except Exception as e:
+            logger.error(f"Error inserting history records: {e}")
+            restore_database('new_history')
+            reporting_failed.append('new_history')
+            return
 
         logger.info("History update completed")
         logger.info("="*100)
@@ -295,193 +280,92 @@ def update_orders():
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
 
-    try:
-        df = pd.read_csv(new_orderscsv)
-        df.issued = pd.to_datetime(df.issued)
-        
-        # Replace inf and NaN values with None/NULL
-        df = df.replace([np.inf, -np.inf], None)
-        df = df.replace(np.nan, None)
-        
-        df.infer_objects()
-        
-        # Check if we need to add an ID column
-        if 'id' in df.columns:
-            # Generate new sequential IDs to avoid conflicts
-            df['id'] = range(1, len(df) + 1)
-        elif 'order_id' not in df.columns:
-            # Only add an id if there's no order_id (which might be the primary key)
-            df.insert(0, 'id', range(1, len(df) + 1))
-        
-        # Get only the columns that exist in the MarketOrders model
-        valid_columns = [column.key for column in inspect(MarketOrders).columns]
-        df = df[df.columns.intersection(valid_columns)]
-        
-        # Handle null columns
-        df = handle_null_columns(df, MarketOrders)
-        
-        # Validate data
-        if df.empty:
-            logger.error("Orders dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in orders data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
-            
-        logger.info(f"Prepared {len(data)} order records for insertion")
-    
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        start = datetime.now()
+
+    df = pd.read_csv(new_orderscsv)
+    df.issued = pd.to_datetime(df.issued)
+    data = clean_data(df)
+
+    engine = get_wcmkt_remote_engine()  
         
         # Only store record count, not full data (to avoid memory issues)
-        record_count = 0
-        with Session(engine) as session:
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM marketorders")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing order records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
+
+    with Session(engine) as session:
+        try:
+            # First clear the existing data - more efficient for large updates
+            logger.info("Clearing existing orders data")
             try:
-                result = session.execute(text("SELECT COUNT(*) FROM marketorders")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing order records")
+                session.execute(text("DELETE FROM marketorders"))
+                session.commit()
             except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-    
-        with Session(engine) as session:
-            try:
-                # First clear the existing data - more efficient for large updates
-                logger.info("Clearing existing orders data")
-                try:
-                    session.execute(text("DELETE FROM marketorders"))
-                    session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not clear marketorders table: {e}")
-                    session.rollback()
-                
-                # Then bulk insert all the new data at once
-                logger.info(f"Inserting {len(data)} orders")
-                if data:
-                    # Split into smaller chunks to avoid exceeding message size limits
-                    for i in range(0, len(data), CHUNK_SIZE):
-                        chunk = data[i:i+CHUNK_SIZE]
-                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
-                        mapper = inspect(MarketOrders)
-                        session.bulk_insert_mappings(mapper, chunk)
-                        session.commit()
-                        
-                logger.info("Orders update completed")
-            except Exception as e:
+                logger.warning(f"Could not clear marketorders table: {e}")
                 session.rollback()
-                logger.info("*"*100)
-                logger.error(f'error: {e} in update_orders')
-                logger.info("*"*100)
-                
-                # Log that we can't restore because we didn't keep the full backup
-                if record_count > 0:
-                    logger.error(f"Cannot rollback {record_count} order records - they were not backed up in memory")
-                    logger.info("restoring from backup instead")
-                raise
-    
-        finish = datetime.now()
-        orders_time = finish - start
-        logger.info(f"orders time: {orders_time}, rows: {len(data)}")
-        logger.info("="*100)
-        
-    except Exception as e:
-        logger.error(f"Failed to update orders: {e}")
-        raise
+            
+            # Then bulk insert all the new data at once
+            logger.info(f"Inserting {len(data)} orders")
+            if data:
+                bulk_insert_in_chunks(session, 'marketorders', data)
+
+            logger.info("Orders update completed")
+        except Exception as e:
+            logger.error(f'error: {e} in update_orders')
+            restore_database('new_orders')
+            reporting_failed.append('new_orders')
+            return
 
 def update_stats():
     logger.info("updating stats")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
+
+    df = pd.read_csv(new_stats)
+    df.last_update = pd.to_datetime(df.last_update)
+
+    # Rename avg_vol column to avg_volume to match the database model
+    df = df.rename(columns={'avg_vol': 'avg_volume'})
+    data = clean_data(df)
+
+    engine = get_wcmkt_remote_engine()
     
-    try:
-        df = pd.read_csv(new_stats)
-        df.last_update = pd.to_datetime(df.last_update)
-    
-        # Rename avg_vol column to avg_volume to match the database model
-        df = df.rename(columns={'avg_vol': 'avg_volume'})
-        
-        # Ensure id column is unique and sequential
-        if 'id' in df.columns:
-            # Generate new sequential IDs to avoid conflicts
-            df['id'] = range(1, len(df) + 1)
-        else:
-            # Add an id column if it doesn't exist (and type_id isn't the primary key)
-            if 'type_id' not in df.columns or not inspect(MarketStats).primary_key[0].name == 'type_id':
-                df.insert(0, 'id', range(1, len(df) + 1))
-        
-        # Handle null columns
-        df = handle_null_columns(df, MarketStats)
-        
-        # Validate data
-        if df.empty:
-            logger.error("Stats dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in stats data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
-        
-        logger.info(f"Prepared {len(data)} stats records for insertion")
-    
-        start = datetime.now()
-    
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        
-        # Only store record count, not full data (to avoid memory issues)
-        record_count = 0
-        with Session(engine) as session:
+    # Only store record count, not full data (to avoid memory issues)
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM marketstats")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing stat records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
+            
+    with Session(engine) as session:
+        try:
+            # Clear existing data
+            logger.info("Clearing existing stats data")
             try:
-                result = session.execute(text("SELECT COUNT(*) FROM marketstats")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing stat records")
+                session.execute(text("DELETE FROM marketstats"))
+                session.commit()
             except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-                
-        with Session(engine) as session:
-            try:
-                # Clear existing data
-                logger.info("Clearing existing stats data")
-                try:
-                    session.execute(text("DELETE FROM marketstats"))
-                    session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not clear marketstats table: {e}")
-                    session.rollback()
-                
-                # Insert new data in chunks
-                logger.info(f"Inserting {len(data)} stats records")
-                if data:
-                    # Split into smaller chunks
-                    for i in range(0, len(data), CHUNK_SIZE):
-                        chunk = data[i:i+CHUNK_SIZE]
-                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
-                        mapper = inspect(MarketStats)
-                        session.bulk_insert_mappings(mapper, chunk)
-                        session.commit()
-                        
-                logger.info("Stats update completed")
-            except Exception as e:
+                logger.warning(f"Could not clear marketstats table: {e}")
                 session.rollback()
-                logger.info("*"*100)
-                logger.error(f'error: {e} in update_stats')
-                logger.info("*"*100)
-                
-                # Log that we can't restore because we didn't keep the full backup
-                if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} stat records - they were not backed up in memory")
-                
-                raise
-    
-        finish = datetime.now()
-        stats_time = finish - start
-        logger.info(f"stats time: {stats_time}, rows: {len(data)}")
-        logger.info("="*100)
-        
-    except Exception as e:
-        logger.error(f"Failed to update stats: {e}")
-        raise
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} stats records")
+            if data:
+                bulk_insert_in_chunks(session, 'marketstats', data)
+                    
+            logger.info("Stats update completed")
+            reporting_ok.append('new_stats')
+        except Exception as e:
+            logger.error(f'error: {e} in update_stats')
+            restore_database('new_stats')
+            reporting_failed.append('new_stats')
+            return
+
 
 def update_doctrines():
     logger.info(f"""
@@ -490,320 +374,259 @@ def update_doctrines():
                 {'-'*100}
                 """)
                 
-    try:
-        start = datetime.now()
-        df = pd.read_csv(new_doctrines)
-        
-        # Already has a good ID strategy, but let's ensure it's 1-based
-        idrange = range(1, len(df) + 1)
-        df['id'] = idrange
+
+    df = pd.read_csv(new_doctrines)
     
-        df = df.sort_values(by='timestamp', ascending=False)
-        df.reset_index(drop=True, inplace=True)
-        ts = df.timestamp[0]
-        df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
-        df.timestamp = pd.to_datetime(df.timestamp)
-        df.rename(columns={'4H_price':'price'}, inplace=True)
-        
-        # Handle null columns
-        df = handle_null_columns(df, Doctrines)
-        
-        # Validate data
-        if df.empty:
-            logger.error("Doctrines dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in doctrines data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
+    # Already has a good ID strategy, but let's ensure it's 1-based
+    idrange = range(1, len(df) + 1)
+    df['id'] = idrange
+
+    df = df.sort_values(by='timestamp', ascending=False)
+    df.reset_index(drop=True, inplace=True)
+    ts = df.timestamp[0]
+    df.timestamp = df.timestamp.apply(lambda x: ts if x == str(0) else x)
+    df.timestamp = pd.to_datetime(df.timestamp)
+    df.rename(columns={'4H_price':'price'}, inplace=True)
+    
+    data = clean_data(df, Doctrines)
+    
+    engine = get_wcmkt_remote_engine()
+    
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM doctrines")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing doctrine records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
             
-        logger.info(f"Prepared {len(data)} doctrine records for insertion")
+    with Session(engine) as session:
+
+        # Clear existing data
+        logger.info("Clearing existing doctrines data")
+        try:
+            session.execute(text("DELETE FROM doctrines"))
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Could not clear doctrines table: {e}")
+            session.rollback()
         
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        
-        # Only store record count, not full data
-        record_count = 0
-        with Session(engine) as session:
+        # Insert new data in chunks
+        logger.info(f"Inserting {len(data)} doctrine records")
+        if data:
             try:
-                result = session.execute(text("SELECT COUNT(*) FROM doctrines")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing doctrine records")
+                bulk_insert_in_chunks(session, 'doctrines', data)
+                reporting_ok.append('new_doctrines')
             except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-                
-        with Session(engine) as session:
-            try:
-                # Clear existing data
-                logger.info("Clearing existing doctrines data")
-                try:
-                    session.execute(text("DELETE FROM doctrines"))
-                    session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not clear doctrines table: {e}")
-                    session.rollback()
-                
-                # Insert new data in chunks
-                logger.info(f"Inserting {len(data)} doctrine records")
-                if data:
-                    # Split into smaller chunks
-                    for i in range(0, len(data), CHUNK_SIZE):
-                        chunk = data[i:i+CHUNK_SIZE]
-                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
-                        mapper = inspect(Doctrines)
-                        session.bulk_insert_mappings(mapper, chunk)
-                        session.commit()
-                        
-                logger.info("Doctrines update completed")
-            except Exception as e:
-                session.rollback()
-                logger.info("*"*100)
                 logger.error(f'error: {e} in update_doctrines')
-                logger.info("*"*100)
-                
-                # Log that we can't restore because we didn't keep the full backup
-                if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} doctrine records - they were not backed up in memory")
-                
-                raise
-    
-        finish = datetime.now()
-        doctrines_time = finish - start
-    
-        logger.info(f"""
-                    {'-'*100}
-                    doctrines time: {doctrines_time}, rows: {len(data)}
-                    {'='*100}
-                    """)
-    except Exception as e:
-        logger.error(f"Failed to update doctrines: {e}")
-        raise
+                restore_database('new_doctrines')
+                reporting_failed.append('new_doctrines')
+                return
+
+    logger.info("Doctrines update completed")
+
 
 def update_ship_targets():
     logger.info("updating ship targets")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
-    try:
-        df = pd.read_csv(ship_targets)
-        df.created_at = pd.to_datetime(df.created_at)
-        
-        # Ensure id column is unique and sequential
-        # First check if id is in the DataFrame
-        if 'id' in df.columns:
-            # Generate new sequential IDs to avoid conflicts
-            df['id'] = range(1, len(df) + 1)
-        else:
-            # Add an id column if it doesn't exist
-            df.insert(0, 'id', range(1, len(df) + 1))
-        
-        # Handle null columns
-        df = handle_null_columns(df, ShipTargets)
-        
-        # Validate that we have data before proceeding
-        if df.empty:
-            logger.error("Ship targets dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in ship targets data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
-            
-        logger.info(f"Prepared {len(data)} ship target records for insertion")
+    df = pd.read_csv(ship_targets)
+    df.created_at = pd.to_datetime(df.created_at)
+    data = clean_data(df, ShipTargets)
     
-        start = datetime.now()
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        
-        # Only store record count, not full data
-        record_count = 0
-        with Session(engine) as session:
+    engine = get_wcmkt_remote_engine()
+    
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM ship_targets")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing ship target records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")            
+    with Session(engine) as session:
+        try:
+            # Clear existing data
+            logger.info("Clearing existing ship targets data")
             try:
-                result = session.execute(text("SELECT COUNT(*) FROM ship_targets")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing ship target records")
+                session.execute(text("DELETE FROM ship_targets"))
+                session.commit()
             except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-        
-        with Session(engine) as session:
-            try:
-                # Clear existing data only after we've validated new data
-                logger.info("Clearing existing ship targets data")
-                try:
-                    session.execute(text("DELETE FROM ship_targets"))
-                    session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not clear ship_targets table: {e}")
-                    session.rollback()
-                
-                # Insert new data in chunks
-                logger.info(f"Inserting {len(data)} ship target records")
-                if data:
-                    # Split into smaller chunks
-                    for i in range(0, len(data), CHUNK_SIZE):
-                        chunk = data[i:i+CHUNK_SIZE]
-                        logger.info(f"Processing chunk {i//CHUNK_SIZE + 1}/{(len(data)-1)//CHUNK_SIZE + 1} ({len(chunk)} records)")
-                        mapper = inspect(ShipTargets)
-                        session.bulk_insert_mappings(mapper, chunk)
-                        session.commit()
-                        
-                logger.info("Ship targets update completed")
-            except Exception as e:
+                logger.warning(f"Could not clear ship_targets table: {e}")
                 session.rollback()
-                logger.info("*"*100)
-                logger.error(f'error: {e} in update_ship_targets')
-                logger.info("*"*100)
-                
-                # Log that we can't restore because we didn't keep the full backup
-                if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} ship target records - they were not backed up in memory")
-                
-                raise
         
-        finish = datetime.now()
-        ship_time = finish - start
-        logger.info(f"ship targets time: {ship_time}, rows: {len(data)}")
-        logger.info("="*100)
-        
-    except Exception as e:
-        logger.error(f"Failed to update ship targets: {e}")
-        raise
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} ship target records")
+            if data:
+                bulk_insert_in_chunks(session, 'ship_targets', data)
+                reporting_ok.append('ship_targets')
+            
+            logger.info("Ship targets update completed")
+        except Exception as e:
+            logger.error(f'error: {e} in update_ship_targets')
+            restore_database('ship_targets')
+            reporting_failed.append('ship_targets')
+            return
+            
+    logger.info(f"Prepared {len(data)} ship target records for insertion")
+    
+    engine = get_wcmkt_remote_engine()
+    
+    with Session(engine) as session:
+
+        result = session.execute(text("SELECT COUNT(*) FROM ship_targets")).scalar()
+        record_count = result or 0
+        logger.info(f"Found {record_count} existing ship target records")
+
+
+        with Session(engine) as session:
+
+            # Clear existing data only after we've validated new data
+            logger.info("Clearing existing ship targets data")
+            try:
+                session.execute(text("DELETE FROM ship_targets"))
+                session.commit()
+            except Exception as e:
+                logger.warning(f"Could not clear ship_targets table: {e}")
+                session.rollback()
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} ship target records")
+            if data:
+                try:
+                    bulk_insert_in_chunks(session, 'ship_targets', data)
+                    reporting_ok.append('ship_targets')
+                except Exception as e:
+                    logger.error(f'error: {e} in update_ship_targets')
+                    restore_database('ship_targets')
+                    reporting_failed.append('ship_targets')
+                    return
+
+            logger.info("Ship targets update completed")
 
 def update_doctrine_map():
     logger.info("updating doctrine map")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
-    try:
-        df = pd.read_csv(doctrine_map)
-        
-        # Ensure id column is unique and sequential
-        if 'id' in df.columns:
-            # Generate new sequential IDs to avoid conflicts
-            df['id'] = range(1, len(df) + 1)
-        else:
-            # Add an id column if it doesn't exist
-            df.insert(0, 'id', range(1, len(df) + 1))
-        
-        # Handle null columns
-        df = handle_null_columns(df, DoctrineMap)
-        
-        # Validate that we have data before proceeding
-        if df.empty:
-            logger.error("Doctrine map dataframe is empty. Aborting update to prevent data loss.")
-            raise ValueError("Empty dataframe - aborting to prevent data loss")
-        
-        data = df.to_dict(orient='records')
-        if not data:
-            logger.error("No records found in doctrine map data. Aborting update to prevent data loss.")
-            raise ValueError("No records in data - aborting to prevent data loss")
-            
-        logger.info(f"Prepared {len(data)} doctrine map records for insertion")
+
+    df = pd.read_csv(doctrine_map)
     
-        start = datetime.now()
-        engine = create_engine(mkt_url, echo=False, connect_args={"timeout": 30})
-        
-        # Only store record count, not full data
-        record_count = 0
-        with Session(engine) as session:
+    data = clean_data(df, DoctrineMap)
+    engine = get_wcmkt_remote_engine()
+
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM doctrine_map")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing doctrine map records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
+    
+    with Session(engine) as session:
+
+        # Clear existing data only after we've validated new data
+        logger.info("Clearing existing doctrine map data")
+        try:
+            session.execute(text("DELETE FROM doctrine_map"))
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Could not clear doctrine_map table: {e}")
+            session.rollback()
+
+        # Insert new data in c  hunks
+        logger.info(f"Inserting {len(data)} doctrine map records")
+        if data:
             try:
-                result = session.execute(text("SELECT COUNT(*) FROM doctrine_map")).scalar()
-                record_count = result or 0
-                logger.info(f"Found {record_count} existing doctrine map records")
+                session.execute(text("DELETE FROM doctrine_map"))
+                session.commit()
             except Exception as e:
-                logger.warning(f"Could not count existing records: {e}")
-        
-        with Session(engine) as session:
-            try:
-                # Clear existing data only after we've validated new data
-                logger.info("Clearing existing doctrine map data")
-                try:
-                    session.execute(text("DELETE FROM doctrine_map"))
-                    session.commit()
-                except Exception as e:
-                    logger.warning(f"Could not clear doctrine_map table: {e}")
-                    session.rollback()
-                
-                # Insert new data in chunks
-                logger.info(f"Inserting {len(data)} doctrine map records")
-                if data:
-                    # Doctrine map is small, no need to chunk
-                    logger.info(f"Processing all {len(data)} records at once")
-                    mapper = inspect(DoctrineMap)
-                    session.bulk_insert_mappings(mapper, data)
-                    session.commit()
-                        
-                logger.info("Doctrine map update completed")
-            except Exception as e:
+                logger.warning(f"Could not clear doctrine_map table: {e}")
                 session.rollback()
-                logger.info("*"*100)
+            
+            # Insert new data in chunks
+            logger.info(f"Inserting {len(data)} doctrine map records")
+
+            try:
+                bulk_insert_in_chunks(session, 'doctrine_map', data)
+                reporting_ok.append('doctrine_map')
+            except Exception as e:
                 logger.error(f'error: {e} in update_doctrine_map')
-                logger.info("*"*100)
-                
-                # Log that we can't restore because we didn't keep the full backup
-                if record_count > 0:
-                    logger.error(f"Cannot restore {record_count} doctrine map records - they were not backed up in memory")
-                
-                raise
-        
-        finish = datetime.now()
-        doctrine_map_time = finish - start
-        logger.info(f"doctrine map time: {doctrine_map_time}, rows: {len(data)}")
-        logger.info("="*100)
-        
-    except Exception as e:
-        logger.error(f"Failed to update doctrine map: {e}")
-        raise
+                restore_database('doctrine_map')
+                reporting_failed.append('doctrine_map')
+                return  
+
+        logger.info("Doctrine map update completed")
 
 def update_doctrine_fits():
     logger.info("updating doctrine fits")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
-    try:
-        df = preprocess_doctrine_fits()
-
-    except Exception as e:
-        logger.error(f"Failed to update doctrine fits: {e}")
-        reporting_failed.append('doctrine_fits')
-        return False
+    df = preprocess_doctrine_fits()
+    data = clean_data(df, DoctrineFits)
+    engine = get_wcmkt_remote_engine()
     
-    turso_url = f"sqlite+{fly_mkt_url}/?authToken={fly_mkt_token}&secure=true"
-    engine = create_engine(turso_url)
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM doctrine_fits")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing doctrine fit records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
+            
+    with Session(engine) as session:
 
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS doctrine_fits"))
-            conn.execute(text("CREATE TABLE doctrine_fits (id INTEGER PRIMARY KEY AUTOINCREMENT, doctrine_name TEXT, fit_name TEXT, ship_type_id INTEGER, doctrine_id INTEGER, fit_id INTEGER, ship_name TEXT, target INTEGER)"))
-            conn.execute(text("INSERT INTO doctrine_fits (doctrine_name, fit_name, ship_type_id, doctrine_id, fit_id, ship_name, target) VALUES (:doctrine_name, :fit_name, :ship_type_id, :doctrine_id, :fit_id, :ship_name, :target)"), df.to_dict(orient='records'))
-            conn.commit()
+        # Clear existing data only after we've validated new data
+        logger.info("Clearing existing doctrine fits data")
+        try:
+            session.execute(text("DELETE FROM doctrine_fits"))
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Could not clear doctrine_fits table: {e}")
+            session.rollback()
 
-    except Exception as e:
-        logger.error(f"Failed to update doctrine fits: {e}")
-        reporting_failed.append('doctrine_fits')
-        return False
+        # Insert new data in chunks
+        logger.info(f"Inserting {len(data)} doctrine fit records")
+        if data:
+            try:
+                bulk_insert_in_chunks(session, 'doctrine_fits', data)
+                reporting_ok.append('doctrine_fits')
+            except Exception as e:
+                logger.error(f'error: {e} in update_doctrine_fits')
+                restore_database('doctrine_fits')
+                reporting_failed.append('doctrine_fits')
+                return
 
-    return True
+        logger.info("Doctrine fits update completed")
 
 def update_lead_ships():
     logger.info("updating lead ships")
     logger.info(f"date: {datetime.now()}")
     logger.info("="*100)
     
-    try:
-        df = pd.read_csv(lead_ships)
-        engine = create_engine(mkt_url)
-        with engine.connect() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS lead_ships"))
-            conn.execute(text("CREATE TABLE lead_ships (id INTEGER PRIMARY KEY AUTOINCREMENT, doctrine_name TEXT, doctrine_id INTEGER, lead_ship INTEGER, fit_id INTEGER)"))
-            conn.execute(text("INSERT INTO lead_ships (doctrine_name, doctrine_id, lead_ship, fit_id) VALUES (:doctrine_name, :doctrine_id, :lead_ship, :fit_id)"), df.to_dict(orient='records'))
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to update lead ships: {e}")
-        reporting_failed.append('lead_ships')
-        return False
+    df = pd.read_csv(lead_ships)
+    data = clean_data(df, LeadShips)
+    engine = get_wcmkt_remote_engine()
+    
+    with Session(engine) as session:
+        try:
+            result = session.execute(text("SELECT COUNT(*) FROM lead_ships")).scalar()
+            record_count = result or 0
+            logger.info(f"Found {record_count} existing lead ship records")
+        except Exception as e:
+            logger.warning(f"Could not count existing records: {e}")
 
-    return True
+    with Session(engine) as session:
+
+        # Clear existing data only after we've validated new data
+        logger.info("Clearing existing lead ships data")
+        try:
+            session.execute(text("DELETE FROM lead_ships"))
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Could not clear lead_ships table: {e}")
+            session.rollback()
 
 def check_tables():
     logger.info("checking tables")
@@ -821,17 +644,10 @@ def check_tables():
             table_name = table.split(".")[0]
             table_dict[table_name] = len(df)
             logger.info(f"{table_name}: {len(df)}")
-    df = pd.read_csv(ship_targets_path)
+
+    df = pd.read_csv(ship_targets)
     table_dict['ship_targets'] = len(df)
-    
-    # Add doctrine_map to table_dict
-    try:
-        df = pd.read_csv(doctrine_map)
-        table_dict['doctrine_map'] = len(df)
-        logger.info(f"doctrine_map: {len(df)}")
-    except Exception as e:
-        logger.warning(f"Could not read doctrine_map: {e}")
-        table_dict['doctrine_map'] = 0
+    logger.info(f"ship_targets: {len(df)}")
         
     logger.info("="*100)
     return table_dict
@@ -854,9 +670,6 @@ def restore_tables(table, db_url, backup_dir, table_map):
         except Exception as e:
             logger.error(f"Error restoring {restored_table}: {e}")
             return False
-
-
-
 
 def main():
     logger.info("starting db update main function")
@@ -1059,6 +872,8 @@ def clean_data(df: pd.DataFrame, model_class) -> list[dict]:
     valid_columns = [column.key for column in inspect(model_class).columns]
     df = df[df.columns.intersection(valid_columns)]
 
+    df = prepare_data_for_insertion(df, model_class)
+
     data = df.to_dict(orient='records')
     return data
 
@@ -1121,17 +936,10 @@ if __name__ == "__main__":
     # conn.sync()
     # conn.close()
 
-    failed_table = 'new_history'
+    failed_table = 'doctrine_fits'
     failed_class = restore_class_map[failed_table]
 
 
-    backup_file = get_most_recent_backup(backup_dir)
+
+ 
     
-    engine = create_engine(f"sqlite+libsql:///{backup_file}")
-    with engine.connect() as conn:
-        df = pd.read_sql_table(failed_class.__tablename__, conn)
-    conn.close()
-    engine.dispose()
-    df = prepare_data_for_insertion(df, failed_class)
-    print(df.dtypes)
-    quit()

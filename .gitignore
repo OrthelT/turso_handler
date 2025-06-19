@@ -15,4 +15,5 @@ sde.db
 sde_master.db
 data/
 backup/
+mock.db
 wcmkt*
