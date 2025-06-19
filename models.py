@@ -2,9 +2,6 @@ import pandas as pd
 from sqlalchemy import MetaData, String, Integer, DateTime, Float, Boolean, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, Mapped, mapped_column
 import libsql_experimental as libsql
-import os
-from dotenv import load_dotenv
-load_dotenv()
 
 class Base(DeclarativeBase):
     pass

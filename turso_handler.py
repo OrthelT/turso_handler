@@ -1,38 +1,38 @@
 import json
-import libsql
 import pandas as pd
 import os
 import shutil
-import time as time_module  # Rename to avoid conflict with datetime.time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, insert, text, inspect, select
+from sqlalchemy import create_engine, insert, text, inspect
 from sqlalchemy.orm import Session
 from datetime import datetime
 import argparse
 import numpy as np
 
 from logging_config import setup_logging
-from models import *
 from doctrine_data import preprocess_doctrine_fits
-from db_utils import *
+from db_utils import get_wcmkt_remote_engine, get_wcmkt_libsql_connection
+from models import MarketStats, MarketOrders, MarketHistory, Doctrines, DoctrineMap, DoctrineFits, LeadShips, ShipTargets, Base
 
 logger = setup_logging(__name__)
 
-datadir = "datafiles"
+datadir = "data"
 
-new_orders = f"{datadir}/new_orders.json"
-new_history = f"{datadir}/new_history.csv"
-new_stats = f"{datadir}/new_stats.csv"
-watchlist = f"{datadir}/watchlist.csv"
-new_orderscsv = f"{datadir}/new_orders.csv"
-new_doctrines = f"{datadir}/new_doctrines.csv"
-doctrine_map = f"{datadir}/doctrine_map.csv"
-lead_ships = f"{datadir}/lead_ships.csv"
+new_orders = os.path.join(datadir, "new_orders.csv")
+new_history = os.path.join(datadir, "new_history.csv")
+new_stats = os.path.join(datadir, "new_stats.csv")
+watchlist = os.path.join(datadir, "watchlist.csv")
+new_orderscsv = os.path.join(datadir, "new_orders.csv")
+new_doctrines = os.path.join(datadir, "new_doctrines.csv")
+doctrine_map = os.path.join(datadir, "doctrine_map.csv")
+lead_ships = os.path.join(datadir, "lead_ships.csv")
 
-ship_targets = f"{datadir}/ship_targets2.csv"
+ship_targets = os.path.join(datadir, "ship_targets2.csv")
 
 # Backup directory
-backup_dir = f"backup"
+backup_dir = "backup"
+
+
 
 load_dotenv()
 
@@ -214,8 +214,6 @@ def get_most_recent_backup(backup_dir):
 
 def restore_database(table):
     failed_class = restore_class_map[table]
-    failed_table = restore_map[table]
-
     backup_file = get_most_recent_backup(backup_dir)
     
     engine = create_engine(f"sqlite+libsql:///{backup_file}")
@@ -244,7 +242,7 @@ def update_history():
     df.date = pd.to_datetime(df.date)
     df.timestamp = pd.to_datetime(df.timestamp)
 
-    data = clean_data(df)
+    data = clean_data(df, MarketHistory)
 
     logger.info(f"Prepared {len(data)} history records for insertion")
 
@@ -263,7 +261,7 @@ def update_history():
             
         logger.info(f"Inserting {len(data)} history records")
         try:
-            bulk_insert_in_chunks(session, 'market_history', data)
+            bulk_insert_in_chunks(session, MarketHistory, data)
             reporting_ok.append('new_history')
         except Exception as e:
             logger.error(f"Error inserting history records: {e}")
@@ -283,7 +281,7 @@ def update_orders():
 
     df = pd.read_csv(new_orderscsv)
     df.issued = pd.to_datetime(df.issued)
-    data = clean_data(df)
+    data = clean_data(df, MarketOrders)
 
     engine = get_wcmkt_remote_engine()  
         
@@ -310,7 +308,7 @@ def update_orders():
             # Then bulk insert all the new data at once
             logger.info(f"Inserting {len(data)} orders")
             if data:
-                bulk_insert_in_chunks(session, 'marketorders', data)
+                bulk_insert_in_chunks(session, MarketOrders, data)
 
             logger.info("Orders update completed")
         except Exception as e:
@@ -329,7 +327,7 @@ def update_stats():
 
     # Rename avg_vol column to avg_volume to match the database model
     df = df.rename(columns={'avg_vol': 'avg_volume'})
-    data = clean_data(df)
+    data = clean_data(df, MarketStats)
 
     engine = get_wcmkt_remote_engine()
     
@@ -356,7 +354,7 @@ def update_stats():
             # Insert new data in chunks
             logger.info(f"Inserting {len(data)} stats records")
             if data:
-                bulk_insert_in_chunks(session, 'marketstats', data)
+                bulk_insert_in_chunks(session, MarketStats, data)
                     
             logger.info("Stats update completed")
             reporting_ok.append('new_stats')
@@ -415,7 +413,7 @@ def update_doctrines():
         logger.info(f"Inserting {len(data)} doctrine records")
         if data:
             try:
-                bulk_insert_in_chunks(session, 'doctrines', data)
+                bulk_insert_in_chunks(session, Doctrines, data)
                 reporting_ok.append('new_doctrines')
             except Exception as e:
                 logger.error(f'error: {e} in update_doctrines')
@@ -424,7 +422,6 @@ def update_doctrines():
                 return
 
     logger.info("Doctrines update completed")
-
 
 def update_ship_targets():
     logger.info("updating ship targets")
@@ -458,7 +455,7 @@ def update_ship_targets():
             # Insert new data in chunks
             logger.info(f"Inserting {len(data)} ship target records")
             if data:
-                bulk_insert_in_chunks(session, 'ship_targets', data)
+                bulk_insert_in_chunks(session, ShipTargets, data)
                 reporting_ok.append('ship_targets')
             
             logger.info("Ship targets update completed")
@@ -494,7 +491,7 @@ def update_ship_targets():
             logger.info(f"Inserting {len(data)} ship target records")
             if data:
                 try:
-                    bulk_insert_in_chunks(session, 'ship_targets', data)
+                    bulk_insert_in_chunks(session, ShipTargets, data)
                     reporting_ok.append('ship_targets')
                 except Exception as e:
                     logger.error(f'error: {e} in update_ship_targets')
@@ -548,7 +545,7 @@ def update_doctrine_map():
             logger.info(f"Inserting {len(data)} doctrine map records")
 
             try:
-                bulk_insert_in_chunks(session, 'doctrine_map', data)
+                bulk_insert_in_chunks(session, DoctrineMap, data)
                 reporting_ok.append('doctrine_map')
             except Exception as e:
                 logger.error(f'error: {e} in update_doctrine_map')
@@ -590,7 +587,7 @@ def update_doctrine_fits():
         logger.info(f"Inserting {len(data)} doctrine fit records")
         if data:
             try:
-                bulk_insert_in_chunks(session, 'doctrine_fits', data)
+                bulk_insert_in_chunks(session, DoctrineFits, data)
                 reporting_ok.append('doctrine_fits')
             except Exception as e:
                 logger.error(f'error: {e} in update_doctrine_fits')
@@ -628,6 +625,20 @@ def update_lead_ships():
             logger.warning(f"Could not clear lead_ships table: {e}")
             session.rollback()
 
+        # Insert new data in chunks
+        logger.info(f"Inserting {len(data)} lead ship records")
+        if data:
+            try:
+                bulk_insert_in_chunks(session, LeadShips, data)
+                reporting_ok.append('lead_ships')   
+            except Exception as e:
+                logger.error(f'error: {e} in update_lead_ships')
+                restore_database('lead_ships')
+                reporting_failed.append('lead_ships')
+                return
+
+        logger.info("Lead ships update completed")
+
 def check_tables():
     logger.info("checking tables")
     logger.info(f"date: {datetime.now()}")
@@ -651,7 +662,6 @@ def check_tables():
         
     logger.info("="*100)
     return table_dict
-
 
 def restore_tables(table, db_url, backup_dir, table_map):
     restored_table = table_map[table]
@@ -698,8 +708,8 @@ def main():
     args = parser.parse_args()
     table_dict = check_tables()
 
-    logger.info(f"connecting to database: {mkt_url}")
-    print(f"connecting to database: {mkt_url}")
+    logger.info(f"connecting to database: {turso_url}")
+    print(f"connecting to database: {turso_url}")
     print("backing up database")
     db_file = backup_database()
     logger.info(f"database backed up to: {db_file}")
@@ -714,7 +724,7 @@ def main():
 
     # Make sure tables exist
     try:
-        engine = create_engine(mkt_url, echo=False)
+        engine = get_wcmkt_remote_engine()
         Base.metadata.create_all(engine)
         logger.info('Ensured all tables exist')
     except Exception as e:
@@ -842,17 +852,6 @@ def main():
     print(f"success rate: {(ok / (ok + failed)):.2f}")
     print("="*80)
 
-    if failed > 0:
-        print("failed to restore some tables, attempting to restore from backup")
-        for table in reporting_failed:
-            status = restore_tables(table = table, db_url = mkt_url, backup_dir = backup_dir, table_map = restore_map)
-            if status:
-                print(f"table: {table} restored successfully")
-            else:
-                print(f"table: {table} restoration failed")
-
-
-
 def clean_data(df: pd.DataFrame, model_class) -> list[dict]:
         
     # Replace inf and NaN values with None/NULL
@@ -871,6 +870,7 @@ def clean_data(df: pd.DataFrame, model_class) -> list[dict]:
    # Get only the columns that exist in the MarketOrders model
     valid_columns = [column.key for column in inspect(model_class).columns]
     df = df[df.columns.intersection(valid_columns)]
+
 
     df = prepare_data_for_insertion(df, model_class)
 
@@ -910,6 +910,8 @@ def prepare_data_for_insertion(df, model_class):
                 try:
                     # Convert the entire Series to datetime
                     df[column_name] = pd.to_datetime(df[column_name])
+                    # Convert to Python datetime objects for SQLAlchemy
+                    df[column_name] = df[column_name].dt.to_pydatetime()
                 except Exception as e:
                     print(f"Error converting {column_name}: {e}")
                     # Set to current datetime as fallback for the entire column
@@ -918,26 +920,8 @@ def prepare_data_for_insertion(df, model_class):
     return df
 
 if __name__ == "__main__":
+    main()
 
-    
-    
-    # backup_engine.dispose()
-
-    # restored_db = "sqlite+libsql:///restored.db"
-    # restored_engine = create_engine(restored_db)
-    # Base.metadata.create_all(restored_engine)
-    # session = Session(restored_engine)
-    # bulk_insert_in_chunks(session, restore_class, df.to_dict(orient='records'))
-    # session.commit()
-    # session.close()
-    # restored_engine.dispose()
-
-    # conn = get_wcmkt_libsql_connection()
-    # conn.sync()
-    # conn.close()
-
-    failed_table = 'doctrine_fits'
-    failed_class = restore_class_map[failed_table]
 
 
 
